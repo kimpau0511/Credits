@@ -22,6 +22,8 @@ export const appRouter = router({
         creatorId: z.string().trim().min(3).max(180),
         name: z.string().trim().min(1).max(200),
         roles: z.array(z.enum(["아티스트", "작사", "작곡", "작사·작곡", "편곡", "프로듀싱", "연주", "기타"])).min(1),
+        externalIpi: z.string().trim().min(3).max(64).optional(),
+        externalMbid: z.string().trim().min(8).max(64).optional(),
       }))
       .query(({ input }) => getCreatorProfile(input)),
   }),

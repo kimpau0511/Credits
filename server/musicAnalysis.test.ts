@@ -6,7 +6,9 @@ import {
   consolidateMusicCredits,
   normalizeCreditRole,
   normalizeCreditsFmRole,
+  profileKindForRoles,
   selectBestCreditsRecording,
+  selectBestMusicBrainzArtist,
   type MusicCredit,
 } from "./musicAnalysis.ts";
 
@@ -33,6 +35,26 @@ describe("music credit normalization", () => {
     assert.equal(result?.isrc, "target");
     assert.equal(normalizeCreditsFmRole("ComposerLyricist"), "작사·작곡");
     assert.equal(normalizeCreditsFmRole("arranger", "producer"), "편곡");
+  });
+
+  it("routes every selectable role to the correct profile catalog", () => {
+    assert.equal(profileKindForRoles(["아티스트"]), "artist");
+    assert.equal(profileKindForRoles(["작사"]), "creator");
+    assert.equal(profileKindForRoles(["작곡", "편곡"]), "creator");
+    assert.equal(profileKindForRoles(["아티스트", "작사·작곡"]), "creator");
+  });
+
+  it("resolves exact Korean and stage-name identities without picking a similar stranger", () => {
+    const candidates = [
+      { id: "wrong", name: "IU tribute", score: 99 },
+      { id: "iu", name: "IU", score: 95, aliases: [{ name: "아이유" }, { name: "이지은" }] },
+      { id: "bigbang", name: "BIGBANG", score: 100 },
+      { id: "kim-eana", name: "김이나", score: 100 },
+    ];
+    assert.equal(selectBestMusicBrainzArtist(candidates, "아이유")?.id, "iu");
+    assert.equal(selectBestMusicBrainzArtist(candidates, "BIGBANG")?.id, "bigbang");
+    assert.equal(selectBestMusicBrainzArtist(candidates, "김이나")?.id, "kim-eana");
+    assert.equal(selectBestMusicBrainzArtist(candidates, "완전히 다른 사람"), undefined);
   });
 
   it("keeps the missing-credit state explicit", () => {
@@ -90,5 +112,8 @@ describe("music credit normalization", () => {
     assert.deepEqual([...new Set(teddy.map(credit => credit.creatorId))], ["ipi:teddy"]);
     assert.deepEqual([...new Set(teddy.map(credit => credit.name))], ["TEDDY"]);
     assert.deepEqual(teddy.map(credit => credit.role).sort(), ["작사·작곡", "편곡"].sort());
+    const teddyNode = buildCooccurrenceNetwork([teddy]).nodes[0];
+    assert.equal(teddyNode.externalIpi, "teddy");
+    assert.equal(teddyNode.externalMbid, "teddy");
   });
 });

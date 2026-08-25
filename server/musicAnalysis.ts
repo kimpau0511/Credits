@@ -30,7 +30,7 @@ export type MusicCredit = {
   externalIpi?: string;
   externalMbid?: string;
 };
-export type NetworkNode = { id: string; name: string; roles: CreditRole[]; appearances: number };
+export type NetworkNode = { id: string; name: string; roles: CreditRole[]; appearances: number; externalIpi?: string; externalMbid?: string };
 export type NetworkEdge = { source: string; target: string; weight: number };
 export type TopTrack = { id: string; title: string; releaseDate?: string; relevance: number };
 export type TrackCandidate = { id: string; title: string; artist: string; releaseDate?: string; source: "Credits.fm" | "MusicBrainz"; isrc?: string };
@@ -57,7 +57,7 @@ export type MusicAnalysis = {
   cache: { state: "fresh" | "cached"; storedAt: number; expiresAt: number };
 };
 
-type MbArtist = { id: string; name: string };
+type MbArtist = { id: string; name: string; score?: number; aliases?: Array<{ name?: string }> };
 type MbRelation = { type?: string; "target-type"?: string; artist?: MbArtist; work?: { id: string }; recording?: { id: string; title?: string } };
 type MbWork = { id: string; title: string; "first-release-date"?: string; relations?: MbRelation[] };
 type MbRecording = { id: string; title: string; length?: number; "first-release-date"?: string; "artist-credit"?: Array<{ artist?: MbArtist; name?: string }>; relations?: MbRelation[] };
@@ -72,11 +72,32 @@ type CreditsBatchResponse = { isrcs?: Record<string, CreditsIsrcResponse | { err
 type CacheRecord<T> = { createdAt: number; result: T };
 const analysisCache = new Map<string, CacheRecord<MusicAnalysis>>();
 const creatorCache = new Map<string, CacheRecord<CreatorProfile>>();
+const identityCache = new Map<string, MbArtist | null>();
 let lastMusicBrainzRequestAt = 0;
 const creditsRateWindows: Record<"search" | "lookup", number[]> = { search: [], lookup: [] };
 
 function sleep(ms: number) { return new Promise(resolve => setTimeout(resolve, ms)); }
 function normalizedText(value: string) { return value.toLowerCase().replace(/[^a-z0-9가-힣]/g, ""); }
+
+export function profileKindForRoles(roles: CreditRole[]): "artist" | "creator" {
+  const hasCreatorRole = roles.some(role => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(role));
+  return roles.includes("아티스트") && !hasCreatorRole ? "artist" : "creator";
+}
+
+export function selectBestMusicBrainzArtist(candidates: MbArtist[], name: string): MbArtist | undefined {
+  const expected = normalizedText(name);
+  return [...candidates].sort((first, second) => {
+    const score = (candidate: MbArtist) => {
+      const names = [candidate.name, ...(candidate.aliases ?? []).map(alias => alias.name ?? "")].map(normalizedText);
+      const exact = names.includes(expected) ? 1000 : names.some(candidateName => candidateName.includes(expected) || expected.includes(candidateName)) ? 300 : 0;
+      return exact + Number(candidate.score ?? 0);
+    };
+    return score(second) - score(first);
+  }).find(candidate => {
+    const names = [candidate.name, ...(candidate.aliases ?? []).map(alias => alias.name ?? "")].map(normalizedText);
+    return names.includes(expected) || (Number(candidate.score ?? 0) >= 90 && names.some(candidateName => candidateName.includes(expected) || expected.includes(candidateName)));
+  });
+}
 
 function creatorIdentityKey(credit: MusicCredit) {
   const normalizedName = normalizedText(credit.name);
@@ -296,15 +317,18 @@ function performanceCredits(recording: MbRecording): MusicCredit[] {
 }
 
 export function buildCooccurrenceNetwork(workCreditSets: MusicCredit[][]): { nodes: NetworkNode[]; edges: NetworkEdge[] } {
-  const nodeMap = new Map<string, { id: string; name: string; roles: Set<CreditRole>; appearances: number }>();
+  const nodeMap = new Map<string, { id: string; name: string; roles: Set<CreditRole>; appearances: number; externalIpi?: string; externalMbid?: string }>();
   const edgeMap = new Map<string, NetworkEdge>();
   for (const rawCredits of workCreditSets) {
     const credits = consolidateMusicCredits(rawCredits);
     const ids = Array.from(new Set(credits.map(credit => credit.creatorId)));
     for (const credit of credits) {
       const current = nodeMap.get(credit.creatorId);
-      if (current) current.roles.add(credit.role);
-      else nodeMap.set(credit.creatorId, { id: credit.creatorId, name: credit.name, roles: new Set([credit.role]), appearances: 0 });
+      if (current) {
+        current.roles.add(credit.role);
+        current.externalIpi ??= credit.externalIpi;
+        current.externalMbid ??= credit.externalMbid;
+      } else nodeMap.set(credit.creatorId, { id: credit.creatorId, name: credit.name, roles: new Set([credit.role]), appearances: 0, externalIpi: credit.externalIpi, externalMbid: credit.externalMbid });
     }
     for (const id of ids) { const node = nodeMap.get(id); if (node) node.appearances += 1; }
     for (let left = 0; left < ids.length; left += 1) for (let right = left + 1; right < ids.length; right += 1) {
@@ -514,15 +538,79 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
   };
 }
 
-export async function getCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
-  const hasSongwritingRole = input.roles.some(role => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(role));
-  return input.creatorId.startsWith("ipi:")
-    ? await getCreditsFmCreatorProfile(input)
-    : input.creatorId.startsWith("mbid:")
-      ? input.roles.includes("아티스트") && !hasSongwritingRole
-        ? await getMusicBrainzArtistProfile(input)
-        : await getMusicBrainzCreatorProfile(input)
-      : { creator: { id: input.creatorId, name: input.name, roles: input.roles }, works: [], collaborators: [], network: { nodes: [], edges: [] }, scannedWorks: 0, confidence: "limited", worksOrder: "catalog", sourceNote: "공개 카탈로그와 연결할 고유 식별자가 없습니다." };
+async function resolveMusicBrainzIdentity(name: string): Promise<MbArtist | undefined> {
+  const key = normalizedText(name);
+  if (identityCache.has(key)) return identityCache.get(key) ?? undefined;
+  const query = `artist:"${name.replace(/"/g, "")}"`;
+  const response = await musicBrainzRequest<{ artists?: MbArtist[] }>(`/artist?query=${encodeURIComponent(query)}&limit=10&fmt=json`);
+  const match = selectBestMusicBrainzArtist(response.artists ?? [], name);
+  identityCache.set(key, match ?? null);
+  return match;
+}
+
+async function getResolvedMusicBrainzProfile(input: { creatorId: string; name: string; roles: CreditRole[] }, mbid: string): Promise<CreatorProfile> {
+  const resolvedInput = { ...input, creatorId: `mbid:${mbid}` };
+  return profileKindForRoles(input.roles) === "artist"
+    ? getMusicBrainzArtistProfile(resolvedInput)
+    : getMusicBrainzCreatorProfile(resolvedInput);
+}
+
+function unavailableCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }, reason: string): CreatorProfile {
+  return {
+    creator: { id: input.creatorId, name: input.name, roles: input.roles },
+    works: [],
+    collaborators: [],
+    network: { nodes: [], edges: [] },
+    scannedWorks: 0,
+    confidence: "limited",
+    worksOrder: "catalog",
+    sourceNote: reason,
+  };
+}
+
+export async function getCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[]; externalIpi?: string; externalMbid?: string }): Promise<CreatorProfile> {
+  let creditsProfile: CreatorProfile | undefined;
+  if (input.creatorId.startsWith("ipi:")) {
+    try {
+      creditsProfile = await getCreditsFmCreatorProfile(input);
+      if (creditsProfile.confidence === "verified") return creditsProfile;
+    } catch (error) {
+      console.warn("[Creator Signal] Credits.fm creator profile fallback", input.creatorId, error);
+    }
+  }
+
+  if (input.externalMbid && !input.creatorId.startsWith("mbid:")) {
+    try {
+      const resolved = await getResolvedMusicBrainzProfile(input, input.externalMbid);
+      return creditsProfile
+        ? { ...resolved, sourceNote: `Credits.fm 프로필의 검증 조건이 부족해 트랙 크레딧에 함께 연결된 MusicBrainz 인물 ID로 교차 조회했습니다. ${resolved.sourceNote}` }
+        : resolved;
+    } catch (error) {
+      console.warn("[Creator Signal] linked MusicBrainz profile fallback", input.externalMbid, error);
+    }
+  }
+
+  if (input.creatorId.startsWith("mbid:")) {
+    try {
+      return await getResolvedMusicBrainzProfile(input, input.creatorId.replace("mbid:", ""));
+    } catch (error) {
+      console.warn("[Creator Signal] direct MusicBrainz profile fallback", input.creatorId, error);
+    }
+  }
+
+  try {
+    const identity = await resolveMusicBrainzIdentity(input.name);
+    if (identity) {
+      const resolved = await getResolvedMusicBrainzProfile(input, identity.id);
+      return creditsProfile
+        ? { ...resolved, sourceNote: `Credits.fm 프로필의 검증 조건이 부족해 동일 이름의 MusicBrainz 인물 ID로 교차 조회했습니다. ${resolved.sourceNote}` }
+        : resolved;
+    }
+  } catch (error) {
+    console.warn("[Creator Signal] name identity resolution failed", input.name, error);
+  }
+
+  return creditsProfile ?? unavailableCreatorProfile(input, "Credits.fm과 MusicBrainz에서 이 이름과 역할에 맞는 고유 인물 식별자를 확인하지 못했습니다. 다른 이름 표기나 공식 식별자가 필요합니다.");
 }
 
 async function musicBrainzFallback(title: string, artist?: string): Promise<MusicAnalysis> {
