@@ -58,7 +58,7 @@ export type MusicAnalysis = {
 };
 
 type MbArtist = { id: string; name: string };
-type MbRelation = { type?: string; "target-type"?: string; artist?: MbArtist; work?: { id: string } };
+type MbRelation = { type?: string; "target-type"?: string; artist?: MbArtist; work?: { id: string }; recording?: { id: string; title?: string } };
 type MbWork = { id: string; title: string; "first-release-date"?: string; relations?: MbRelation[] };
 type MbRecording = { id: string; title: string; length?: number; "first-release-date"?: string; "artist-credit"?: Array<{ artist?: MbArtist; name?: string }>; relations?: MbRelation[] };
 type CreditsSearchRecording = { isrc: string; title: string; artist_names?: string[]; release_date?: string };
@@ -422,32 +422,54 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
   let totalWorks = 0;
   while (works.length < MUSICBRAINZ_MAX_CREATOR_WORKS) {
     const offset = works.length;
-    const response = await musicBrainzRequest<{ works?: MbWork[]; "work-count"?: number }>(`/work?artist=${encodeURIComponent(id)}&limit=100&offset=${offset}&inc=artist-rels&fmt=json`);
+    const response = await musicBrainzRequest<{ works?: MbWork[]; "work-count"?: number }>(`/work?artist=${encodeURIComponent(id)}&limit=100&offset=${offset}&inc=artist-rels+recording-rels&fmt=json`);
     const page = response.works ?? [];
     totalWorks = response["work-count"] ?? page.length;
     works.push(...page);
     if (!page.length || works.length >= totalWorks) break;
   }
-  const creditSets = works.map(work => consolidateMusicCredits(creditsFromArtistRelations(work.relations)));
+  const songwritingRoles: CreditRole[] = ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"];
+  const verifiedWorks = works.filter(work => work.relations?.some(relation => relation.artist?.id === id && songwritingRoles.includes(normalizeCreditRole(relation.type))));
+  const creditSets = verifiedWorks.map(work => consolidateMusicCredits(creditsFromArtistRelations(work.relations)).filter(credit => songwritingRoles.includes(credit.role)));
   const network = buildCooccurrenceNetwork(creditSets);
   const collaborators = network.edges.filter(edge => edge.source === input.creatorId || edge.target === input.creatorId).map(edge => {
     const collaboratorId = edge.source === input.creatorId ? edge.target : edge.source;
     const node = network.nodes.find(candidate => candidate.id === collaboratorId);
-    return node ? { creatorId: node.id, name: node.name, roles: node.roles, workCount: edge.weight, sharePercent: Math.round((edge.weight / Math.max(works.length, 1)) * 100) } : undefined;
+    return node ? { creatorId: node.id, name: node.name, roles: node.roles, workCount: edge.weight, sharePercent: Math.round((edge.weight / Math.max(verifiedWorks.length, 1)) * 100) } : undefined;
   }).filter((item): item is CollaboratorSignal => Boolean(item)).sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 5);
   const linkedWorks = creditSets.filter(credits => credits.some(credit => credit.creatorId === input.creatorId)).length;
   const confidence = linkedWorks >= 3 && collaborators.length ? "verified" : "limited";
+  const recordingToWork = new Map<string, string>();
+  for (const work of verifiedWorks) {
+    const recordings = (work.relations ?? []).filter(relation => relation.recording?.id).map(relation => relation.recording!);
+    const recording = recordings.find(candidate => normalizedText(candidate.title ?? "") === normalizedText(work.title)) ?? recordings[0];
+    if (recording) recordingToWork.set(recording.id, work.id);
+  }
+  const releaseDates = new Map<string, string>();
+  const recordingIds = Array.from(recordingToWork.keys());
+  for (let start = 0; start < recordingIds.length; start += 20) {
+    const chunk = recordingIds.slice(start, start + 20);
+    const query = chunk.map(recordingId => `rid:${recordingId}`).join(" OR ");
+    const response = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(query)}&limit=${chunk.length}&fmt=json`);
+    for (const recording of response.recordings ?? []) {
+      const workId = recordingToWork.get(recording.id);
+      const releaseDate = recording["first-release-date"];
+      if (workId && releaseDate && (!releaseDates.get(workId) || releaseDate < releaseDates.get(workId)!)) releaseDates.set(workId, releaseDate);
+    }
+  }
+  const datedWorks = verifiedWorks.map(work => ({ id: work.id, title: work.title, releaseDate: releaseDates.get(work.id), relevance: 0 }))
+    .sort((first, second) => (second.releaseDate ?? "").localeCompare(first.releaseDate ?? "") || first.title.localeCompare(second.title));
   return {
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
-    works: works.slice(0, CREATOR_SCAN_LIMIT).map(work => ({ id: work.id, title: work.title, releaseDate: work["first-release-date"], relevance: 0 })),
+    works: datedWorks.slice(0, CREATOR_SCAN_LIMIT),
     collaborators: confidence === "verified" ? collaborators : [],
     network: confidence === "verified" ? network : { nodes: [], edges: [] },
-    scannedWorks: works.length,
+    scannedWorks: verifiedWorks.length,
     confidence,
-    worksOrder: "catalog",
+    worksOrder: releaseDates.size ? "recent" : "catalog",
     sourceNote: confidence === "verified"
-      ? `MusicBrainz에서 ${works.length}${works.length < totalWorks ? `/${totalWorks}` : ""}개 작품의 작사·작곡 관계를 함께 조회해 반복 공동 크레딧을 집계했습니다. 발매일이 없는 작품이 있어 작품 목록은 최신순이 아닌 카탈로그 표본 순서입니다.`
-      : `MusicBrainz에서 ${works.length}${works.length < totalWorks ? `/${totalWorks}` : ""}개 작품을 조회했지만 공동 크레딧 관계가 충분하지 않아 협업 통계를 표시하지 않습니다.`,
+      ? `MusicBrainz에서 최대 500개 한도로 ${works.length}${works.length < totalWorks ? `/${totalWorks}` : ""}개를 조회하고, ${input.name}의 송라이팅 관계가 실제 확인된 ${verifiedWorks.length}개 작품만 집계했습니다. 대표 녹음 기준 발매일은 ${releaseDates.size}개 작품에서 확인했습니다.`
+      : `MusicBrainz에서 최대 500개 한도로 조회한 뒤 ${input.name}의 송라이팅 관계가 실제 확인된 작품 ${verifiedWorks.length}개만 남겼지만, 공동 크레딧 관계가 충분하지 않아 협업 통계를 표시하지 않습니다.`,
   };
 }
 
