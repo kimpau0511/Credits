@@ -14,6 +14,10 @@ const CREATOR_ALIAS_GROUPS = [
     canonicalName: "G-DRAGON",
     aliases: ["G-DRAGON", "G Dragon", "GD", "권지용", "Kwon Ji-yong", "Kwon Jiyong"],
   },
+  {
+    canonicalName: "TEDDY",
+    aliases: ["TEDDY", "PARK HONG JUN", "PARK HONG-JUN", "HONG JUN PARK", "박홍준"],
+  },
 ] as const;
 
 export type CreditRole = "아티스트" | "작사" | "작곡" | "작사·작곡" | "편곡" | "프로듀싱" | "연주" | "기타";
@@ -36,6 +40,7 @@ export type CreatorProfile = {
   collaborators: CollaboratorSignal[];
   network: { nodes: NetworkNode[]; edges: NetworkEdge[] };
   scannedWorks: number;
+  confidence: "verified" | "limited";
   sourceNote: string;
 };
 export type MusicAnalysis = {
@@ -60,6 +65,7 @@ type CreditsSongwriter = { name: string; ipi?: string; role?: string };
 type CreditsPerformer = { name: string; mbid?: string; role?: string; credit_type?: string };
 type CreditsIsrcResponse = { isrc: string; recording_title?: string; song_title?: string; artist_names?: string[]; release_date?: string; songwriters?: CreditsSongwriter[]; performers?: CreditsPerformer[]; sources?: string[]; updated_at?: string };
 type CreditsIpiResponse = { ipi: string; full_name: string; roles?: string[]; isrcs?: string[] };
+type CreditsBatchResponse = { isrcs?: Record<string, CreditsIsrcResponse | { error?: string }> };
 
 type CacheRecord<T> = { createdAt: number; result: T };
 const analysisCache = new Map<string, CacheRecord<MusicAnalysis>>();
@@ -135,7 +141,29 @@ async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lo
   enforceCreditsRateLimit(kind);
   const headers: Record<string, string> = { Accept: "application/json" };
   if (CREDITS_FM_API_KEY) headers["x-api-key"] = CREDITS_FM_API_KEY;
-  const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { headers });
+  const attempts = kind === "search" ? 2 : 1;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { headers, signal: AbortSignal.timeout(10_000) });
+      if (response.ok) return response.json() as Promise<T>;
+      const error = new Error(response.status === 429 ? "CREDITS_RATE_LIMIT" : `CREDITS_FM_${response.status}`);
+      if (response.status !== 503 || attempt === attempts - 1) throw error;
+      lastError = error;
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts - 1) throw error;
+    }
+    await sleep(250);
+  }
+  throw lastError;
+}
+
+async function creditsFmPost<T>(path: string, body: unknown): Promise<T> {
+  enforceCreditsRateLimit("lookup");
+  const headers: Record<string, string> = { Accept: "application/json", "Content-Type": "application/json" };
+  if (CREDITS_FM_API_KEY) headers["x-api-key"] = CREDITS_FM_API_KEY;
+  const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(12_000) });
   if (!response.ok) throw new Error(response.status === 429 ? "CREDITS_RATE_LIMIT" : `CREDITS_FM_${response.status}`);
   return response.json() as Promise<T>;
 }
@@ -307,12 +335,12 @@ export function buildBriefing(track: MusicAnalysis["track"], credits: MusicCredi
     ? `${track.title}에서 확인된 고유 참여자는 ${people.length}명이며, 송라이팅에는 ${songwriters.length}명이 이름을 올렸습니다. 핵심 송라이팅 크레딧은 ${songwriterNames}입니다.`
     : `${track.title}에서 확인된 고유 참여자는 ${people.length}명이지만, 현재 응답에서는 확정된 송라이팅 크레딧을 찾지 못했습니다.`;
   const structure = songwriters.length > 1
-    ? `${songwriters.length}명이 참여한 공동 송라이팅 구조입니다.${combinedWriters.length ? ` 이 가운데 ${combinedWriters.map(person => person.name).join(", ")}은(는) 작사와 작곡을 함께 담당해 곡의 창작 방향에 걸친 역할 중첩이 확인됩니다.` : " 작사와 작곡이 인물별로 분리된 구조인지 각 크리에이터의 역할을 교차 확인할 필요가 있습니다."}`
+    ? `${songwriters.length}명이 참여한 공동 송라이팅 구조입니다.${combinedWriters.length ? ` 작사와 작곡을 함께 담당한 인물은 ${combinedWriters.map(person => person.name).join(", ")}이며, 곡의 창작 방향에 걸친 역할 중첩이 확인됩니다.` : " 작사와 작곡이 인물별로 분리된 구조인지 각 크리에이터의 역할을 교차 확인할 필요가 있습니다."}`
     : songwriters.length === 1
       ? `${songwriters[0].name} 중심의 송라이팅 구조로 확인됩니다.${combinedWriters.length ? " 작사와 작곡을 함께 맡아 창작 관여 범위가 넓습니다." : " 표시된 역할 범위 안에서 단독 기여 여부를 추가 확인할 가치가 있습니다."}`
       : "송라이팅 구조를 판단할 정보가 부족하므로 다른 표기, ISRC 또는 보조 출처로 교차 확인하는 것이 우선입니다.";
   const researchPoint = lead
-    ? `${lead.name}은(는) 확인된 제작 역할이 가장 넓은 우선 조사 대상입니다. 인물 카드를 선택해 최근 작업과 반복 협업자를 확인하면 이 곡이 기존 작업 네트워크의 연장선인지 판단할 수 있습니다.${supportingRoles.length ? ` 편곡·프로듀싱 층에서는 ${supportingRoles.join(", ")}도 함께 확인됩니다.` : ""}`
+    ? `확인된 제작 역할이 가장 넓은 우선 조사 대상은 ${lead.name}입니다. 인물 카드를 선택해 최근 작업과 반복 협업자를 확인하면 이 곡이 기존 작업 네트워크의 연장선인지 판단할 수 있습니다.${supportingRoles.length ? ` 편곡·프로듀싱 층에서는 ${supportingRoles.join(", ")}도 함께 확인됩니다.` : ""}`
     : "현재 데이터만으로 우선 조사할 제작 인물을 특정하기 어렵습니다.";
   const caveat = status === "enriched"
     ? "공개 API에서 상세 제작 크레딧이 확인된 결과입니다. 아래 판단은 표시된 크레딧을 기준으로 하며 계약상 지분이나 실제 기여량을 의미하지 않습니다."
@@ -331,24 +359,44 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
   const cached = creatorCache.get(input.creatorId);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return cached.result;
   const profile = await creditsFmRequest<CreditsIpiResponse>(`/ipi/${encodeURIComponent(input.creatorId.replace("ipi:", ""))}`);
-  const rows: Array<{ recording: CreditsIsrcResponse; credits: MusicCredit[] }> = [];
-  for (const isrc of (profile.isrcs ?? []).slice(0, CREATOR_SCAN_LIMIT)) {
-    try { const recording = await creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(isrc)}`); rows.push({ recording, credits: creditsFromCreditsFm(recording) }); }
-    catch (error) { console.warn("[Creator Signal] skipped Credits.fm work", isrc, error); }
+  const catalogIsrcs = Array.from(new Set(profile.isrcs ?? [])).slice(0, 100);
+  let recordings: CreditsIsrcResponse[] = [];
+  if (catalogIsrcs.length) {
+    try {
+      const batch = await creditsFmPost<CreditsBatchResponse>("/batch", { isrcs: catalogIsrcs });
+      recordings = Object.values(batch.isrcs ?? {}).filter((recording): recording is CreditsIsrcResponse => "isrc" in recording && Boolean(recording.isrc));
+    } catch (error) {
+      console.warn("[Creator Signal] Credits.fm batch profile fallback", error);
+    }
   }
-  const network = buildCooccurrenceNetwork(rows.map(row => row.credits));
+  if (!recordings.length) {
+    const fallback = await Promise.allSettled(catalogIsrcs.slice(0, CREATOR_SCAN_LIMIT).map(isrc => creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(isrc)}`)));
+    recordings = fallback.filter((item): item is PromiseFulfilledResult<CreditsIsrcResponse> => item.status === "fulfilled").map(item => item.value);
+  }
+  const rows = recordings
+    .filter(recording => recording.songwriters?.some(songwriter => songwriter.ipi === profile.ipi))
+    .filter((recording): recording is CreditsIsrcResponse => "isrc" in recording && Boolean(recording.isrc))
+    .map(recording => ({ recording, credits: creditsFromCreditsFm(recording) }))
+    .sort((first, second) => (second.recording.release_date ?? "").localeCompare(first.recording.release_date ?? "") || first.recording.isrc.localeCompare(second.recording.isrc));
+  const datedWorks = rows.filter(row => Boolean(row.recording.release_date)).length;
+  const confidence = rows.length >= 3 && datedWorks >= Math.min(3, rows.length) ? "verified" : "limited";
+  const sampleRows = rows.slice(0, CREATOR_SCAN_LIMIT);
+  const network = confidence === "verified" ? buildCooccurrenceNetwork(sampleRows.map(row => row.credits)) : { nodes: [], edges: [] };
   const collaborators = network.edges.filter(edge => edge.source === input.creatorId || edge.target === input.creatorId).map(edge => {
     const collaboratorId = edge.source === input.creatorId ? edge.target : edge.source;
     const node = network.nodes.find(candidate => candidate.id === collaboratorId);
-    return node ? { creatorId: node.id, name: node.name, roles: node.roles, workCount: edge.weight, sharePercent: Math.round((edge.weight / Math.max(rows.length, 1)) * 100) } : undefined;
+    return node ? { creatorId: node.id, name: node.name, roles: node.roles, workCount: edge.weight, sharePercent: Math.round((edge.weight / Math.max(sampleRows.length, 1)) * 100) } : undefined;
   }).filter((item): item is CollaboratorSignal => Boolean(item)).sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 5);
   const result: CreatorProfile = {
-    creator: { id: input.creatorId, name: profile.full_name || input.name, roles: input.roles },
-    works: rows.map(row => ({ id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 })).sort((a, b) => (b.releaseDate ?? "").localeCompare(a.releaseDate ?? "")).slice(0, 6),
+    creator: { id: input.creatorId, name: input.name, roles: input.roles },
+    works: sampleRows.map(row => ({ id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 })).slice(0, 6),
     collaborators,
     network,
-    scannedWorks: rows.length,
-    sourceNote: "Credits.fm IPI 카탈로그의 최근 표본을 요청 시 조회해 동시 출현을 집계했습니다.",
+    scannedWorks: sampleRows.length,
+    confidence,
+    sourceNote: confidence === "verified"
+      ? `Credits.fm IPI 카탈로그 ${catalogIsrcs.length}건 중 식별자가 일치하는 ${rows.length}건을 확인하고, 날짜순 최근 ${sampleRows.length}건의 동시 크레딧을 집계했습니다. 표본 기반 결과이므로 전체 경력 통계와 다를 수 있습니다.`
+      : `Credits.fm IPI 카탈로그에서 식별자가 일치하는 작품 ${rows.length}건을 찾았지만 발매일이 확인된 작품은 ${datedWorks}건뿐입니다. 최근 작업 순서와 반복 협업 통계의 신뢰 조건이 부족해 협업 비율·순위·그래프는 표시하지 않습니다.`,
   };
   creatorCache.set(input.creatorId, { createdAt: Date.now(), result });
   return result;
@@ -357,7 +405,7 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
 async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
   const id = input.creatorId.replace("mbid:", "");
   const works = await musicBrainzRequest<{ works?: MbWork[] }>(`/work?artist=${encodeURIComponent(id)}&limit=${CREATOR_SCAN_LIMIT}&fmt=json`);
-  return { creator: { id: input.creatorId, name: input.name, roles: input.roles }, works: (works.works ?? []).map(work => ({ id: work.id, title: work.title, releaseDate: work["first-release-date"], relevance: 0 })), collaborators: [], network: { nodes: [], edges: [] }, scannedWorks: 0, sourceNote: "MusicBrainz 공개 작품 관계에서 조회했습니다. 상세 반복 협업은 송라이팅 IPI 연결이 있는 크리에이터에서 가장 잘 작동합니다." };
+  return { creator: { id: input.creatorId, name: input.name, roles: input.roles }, works: (works.works ?? []).map(work => ({ id: work.id, title: work.title, releaseDate: work["first-release-date"], relevance: 0 })), collaborators: [], network: { nodes: [], edges: [] }, scannedWorks: 0, confidence: "limited", sourceNote: "MusicBrainz 공개 작품 관계에서 조회했습니다. 상세 반복 협업은 송라이팅 IPI 연결이 있는 크리에이터에서 가장 잘 작동합니다." };
 }
 
 export async function getCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
@@ -365,7 +413,7 @@ export async function getCreatorProfile(input: { creatorId: string; name: string
     ? await getCreditsFmCreatorProfile(input)
     : input.creatorId.startsWith("mbid:")
       ? await getMusicBrainzCreatorProfile(input)
-      : { creator: { id: input.creatorId, name: input.name, roles: input.roles }, works: [], collaborators: [], network: { nodes: [], edges: [] }, scannedWorks: 0, sourceNote: "공개 카탈로그와 연결할 고유 식별자가 없습니다." };
+      : { creator: { id: input.creatorId, name: input.name, roles: input.roles }, works: [], collaborators: [], network: { nodes: [], edges: [] }, scannedWorks: 0, confidence: "limited", sourceNote: "공개 카탈로그와 연결할 고유 식별자가 없습니다." };
 }
 
 async function musicBrainzFallback(title: string, artist?: string): Promise<MusicAnalysis> {

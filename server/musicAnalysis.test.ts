@@ -82,5 +82,13 @@ describe("music credit normalization", () => {
     assert.deepEqual([...new Set(result.map(credit => credit.creatorId))], ["ipi:123"]);
     assert.deepEqual([...new Set(result.map(credit => credit.name))], ["G-DRAGON"]);
     assert.deepEqual(result.map(credit => credit.role).sort(), ["아티스트", "작곡", "작사"].sort());
+
+    const teddy = consolidateMusicCredits([
+      { creatorId: "ipi:teddy", externalIpi: "teddy", name: "PARK HONG JUN", role: "작사·작곡", source: "Credits.fm" },
+      { creatorId: "mbid:teddy", externalMbid: "teddy", name: "TEDDY", role: "편곡", source: "Credits.fm" },
+    ]);
+    assert.deepEqual([...new Set(teddy.map(credit => credit.creatorId))], ["ipi:teddy"]);
+    assert.deepEqual([...new Set(teddy.map(credit => credit.name))], ["TEDDY"]);
+    assert.deepEqual(teddy.map(credit => credit.role).sort(), ["작사·작곡", "편곡"].sort());
   });
 });
