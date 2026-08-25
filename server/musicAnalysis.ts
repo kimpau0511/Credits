@@ -4,6 +4,7 @@ const CREDITS_FM_BASE_URL = "https://api.credits.fm/v1";
 const CREDITS_FM_API_KEY = process.env.CREDITS_FM_API_KEY?.trim();
 const CACHE_TTL_MS = 1000 * 60 * 20;
 const CREATOR_SCAN_LIMIT = 12;
+const MUSICBRAINZ_MAX_CREATOR_WORKS = 500;
 
 // External catalogs often describe one person with a stage name in performer
 // credits and a legal name in songwriting credits. Keep these aliases in the
@@ -130,15 +131,26 @@ function enforceCreditsRateLimit(kind: "search" | "lookup") {
 }
 
 async function musicBrainzRequest<T>(path: string): Promise<T> {
-  const wait = Math.max(0, 1050 - (Date.now() - lastMusicBrainzRequestAt));
-  if (wait) await sleep(wait);
-  lastMusicBrainzRequestAt = Date.now();
-  const response = await fetch(`${MUSICBRAINZ_BASE_URL}${path}`, { headers: { Accept: "application/json", "User-Agent": MUSICBRAINZ_USER_AGENT } });
-  if (!response.ok) throw new Error(`MUSICBRAINZ_${response.status}`);
-  return response.json() as Promise<T>;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const wait = Math.max(0, 1050 - (Date.now() - lastMusicBrainzRequestAt));
+    if (wait) await sleep(wait);
+    lastMusicBrainzRequestAt = Date.now();
+    try {
+      const response = await fetch(`${MUSICBRAINZ_BASE_URL}${path}`, { headers: { Accept: "application/json", "User-Agent": MUSICBRAINZ_USER_AGENT }, signal: AbortSignal.timeout(10_000) });
+      if (response.ok) return response.json() as Promise<T>;
+      const error = new Error(`MUSICBRAINZ_${response.status}`);
+      if (response.status < 500 || attempt === 1) throw error;
+      lastError = error;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1) throw error;
+    }
+  }
+  throw lastError;
 }
 
-async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lookup"): Promise<T> {
+async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lookup", timeoutMs = 10_000): Promise<T> {
   enforceCreditsRateLimit(kind);
   const headers: Record<string, string> = { Accept: "application/json" };
   if (CREDITS_FM_API_KEY) headers["x-api-key"] = CREDITS_FM_API_KEY;
@@ -146,7 +158,7 @@ async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lo
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { headers, signal: AbortSignal.timeout(10_000) });
+      const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { headers, signal: AbortSignal.timeout(timeoutMs) });
       if (response.ok) return response.json() as Promise<T>;
       const error = new Error(response.status === 429 ? "CREDITS_RATE_LIMIT" : `CREDITS_FM_${response.status}`);
       if (response.status !== 503 || attempt === attempts - 1) throw error;
@@ -406,8 +418,16 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
 
 async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
   const id = input.creatorId.replace("mbid:", "");
-  const response = await musicBrainzRequest<{ works?: MbWork[] }>(`/work?artist=${encodeURIComponent(id)}&limit=${CREATOR_SCAN_LIMIT}&inc=artist-rels&fmt=json`);
-  const works = response.works ?? [];
+  const works: MbWork[] = [];
+  let totalWorks = 0;
+  while (works.length < MUSICBRAINZ_MAX_CREATOR_WORKS) {
+    const offset = works.length;
+    const response = await musicBrainzRequest<{ works?: MbWork[]; "work-count"?: number }>(`/work?artist=${encodeURIComponent(id)}&limit=100&offset=${offset}&inc=artist-rels&fmt=json`);
+    const page = response.works ?? [];
+    totalWorks = response["work-count"] ?? page.length;
+    works.push(...page);
+    if (!page.length || works.length >= totalWorks) break;
+  }
   const creditSets = works.map(work => consolidateMusicCredits(creditsFromArtistRelations(work.relations)));
   const network = buildCooccurrenceNetwork(creditSets);
   const collaborators = network.edges.filter(edge => edge.source === input.creatorId || edge.target === input.creatorId).map(edge => {
@@ -419,15 +439,15 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
   const confidence = linkedWorks >= 3 && collaborators.length ? "verified" : "limited";
   return {
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
-    works: works.map(work => ({ id: work.id, title: work.title, releaseDate: work["first-release-date"], relevance: 0 })),
+    works: works.slice(0, CREATOR_SCAN_LIMIT).map(work => ({ id: work.id, title: work.title, releaseDate: work["first-release-date"], relevance: 0 })),
     collaborators: confidence === "verified" ? collaborators : [],
     network: confidence === "verified" ? network : { nodes: [], edges: [] },
     scannedWorks: works.length,
     confidence,
     worksOrder: "catalog",
     sourceNote: confidence === "verified"
-      ? `MusicBrainz에서 ${works.length}개 작품 표본의 작사·작곡 관계를 함께 조회해 반복 등장한 공동 크레딧을 집계했습니다. 발매일이 없는 작품이 있어 최신순이 아닌 카탈로그 표본 순서입니다.`
-      : `MusicBrainz에서 ${works.length}개 작품을 조회했지만 공동 크레딧 관계가 충분하지 않아 협업 통계를 표시하지 않습니다.`,
+      ? `MusicBrainz에서 ${works.length}${works.length < totalWorks ? `/${totalWorks}` : ""}개 작품의 작사·작곡 관계를 함께 조회해 반복 공동 크레딧을 집계했습니다. 발매일이 없는 작품이 있어 작품 목록은 최신순이 아닌 카탈로그 표본 순서입니다.`
+      : `MusicBrainz에서 ${works.length}${works.length < totalWorks ? `/${totalWorks}` : ""}개 작품을 조회했지만 공동 크레딧 관계가 충분하지 않아 협업 통계를 표시하지 않습니다.`,
   };
 }
 
@@ -460,7 +480,7 @@ export async function analyzeMusic(input: { title: string; artist?: string; isrc
   const key = input.isrc ? `isrc:${input.isrc}` : `${title.toLowerCase()}::${artist?.toLowerCase() ?? ""}`;
   const cached = analysisCache.get(key);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return { ...cached.result, cache: { state: "cached", storedAt: cached.createdAt, expiresAt: cached.createdAt + CACHE_TTL_MS } };
-  const creditsRecording = await (input.isrc ? creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(input.isrc)}`) : creditsFmTrack(title, artist)).catch(error => { console.warn("[Creator Signal] Credits.fm fallback", error); return undefined; });
+  const creditsRecording = await (input.isrc ? creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(input.isrc)}`, "lookup", 5_000) : creditsFmTrack(title, artist)).catch(error => { console.warn("[Creator Signal] Credits.fm fallback", error); return undefined; });
   let result: MusicAnalysis;
   if (creditsRecording) {
     const credits = creditsFromCreditsFm(creditsRecording);
