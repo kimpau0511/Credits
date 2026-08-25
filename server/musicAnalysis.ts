@@ -41,6 +41,7 @@ export type CreatorProfile = {
   network: { nodes: NetworkNode[]; edges: NetworkEdge[] };
   scannedWorks: number;
   confidence: "verified" | "limited";
+  worksOrder: "recent" | "catalog";
   sourceNote: string;
 };
 export type MusicAnalysis = {
@@ -394,6 +395,7 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
     network,
     scannedWorks: sampleRows.length,
     confidence,
+    worksOrder: confidence === "verified" ? "recent" : "catalog",
     sourceNote: confidence === "verified"
       ? `Credits.fm IPI 카탈로그 ${catalogIsrcs.length}건 중 식별자가 일치하는 ${rows.length}건을 확인하고, 날짜순 최근 ${sampleRows.length}건의 동시 크레딧을 집계했습니다. 표본 기반 결과이므로 전체 경력 통계와 다를 수 있습니다.`
       : `Credits.fm IPI 카탈로그에서 식별자가 일치하는 작품 ${rows.length}건을 찾았지만 발매일이 확인된 작품은 ${datedWorks}건뿐입니다. 최근 작업 순서와 반복 협업 통계의 신뢰 조건이 부족해 협업 비율·순위·그래프는 표시하지 않습니다.`,
@@ -404,8 +406,29 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
 
 async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
   const id = input.creatorId.replace("mbid:", "");
-  const works = await musicBrainzRequest<{ works?: MbWork[] }>(`/work?artist=${encodeURIComponent(id)}&limit=${CREATOR_SCAN_LIMIT}&fmt=json`);
-  return { creator: { id: input.creatorId, name: input.name, roles: input.roles }, works: (works.works ?? []).map(work => ({ id: work.id, title: work.title, releaseDate: work["first-release-date"], relevance: 0 })), collaborators: [], network: { nodes: [], edges: [] }, scannedWorks: 0, confidence: "limited", sourceNote: "MusicBrainz 공개 작품 관계에서 조회했습니다. 상세 반복 협업은 송라이팅 IPI 연결이 있는 크리에이터에서 가장 잘 작동합니다." };
+  const response = await musicBrainzRequest<{ works?: MbWork[] }>(`/work?artist=${encodeURIComponent(id)}&limit=${CREATOR_SCAN_LIMIT}&inc=artist-rels&fmt=json`);
+  const works = response.works ?? [];
+  const creditSets = works.map(work => consolidateMusicCredits(creditsFromArtistRelations(work.relations)));
+  const network = buildCooccurrenceNetwork(creditSets);
+  const collaborators = network.edges.filter(edge => edge.source === input.creatorId || edge.target === input.creatorId).map(edge => {
+    const collaboratorId = edge.source === input.creatorId ? edge.target : edge.source;
+    const node = network.nodes.find(candidate => candidate.id === collaboratorId);
+    return node ? { creatorId: node.id, name: node.name, roles: node.roles, workCount: edge.weight, sharePercent: Math.round((edge.weight / Math.max(works.length, 1)) * 100) } : undefined;
+  }).filter((item): item is CollaboratorSignal => Boolean(item)).sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 5);
+  const linkedWorks = creditSets.filter(credits => credits.some(credit => credit.creatorId === input.creatorId)).length;
+  const confidence = linkedWorks >= 3 && collaborators.length ? "verified" : "limited";
+  return {
+    creator: { id: input.creatorId, name: input.name, roles: input.roles },
+    works: works.map(work => ({ id: work.id, title: work.title, releaseDate: work["first-release-date"], relevance: 0 })),
+    collaborators: confidence === "verified" ? collaborators : [],
+    network: confidence === "verified" ? network : { nodes: [], edges: [] },
+    scannedWorks: works.length,
+    confidence,
+    worksOrder: "catalog",
+    sourceNote: confidence === "verified"
+      ? `MusicBrainz에서 ${works.length}개 작품 표본의 작사·작곡 관계를 함께 조회해 반복 등장한 공동 크레딧을 집계했습니다. 발매일이 없는 작품이 있어 최신순이 아닌 카탈로그 표본 순서입니다.`
+      : `MusicBrainz에서 ${works.length}개 작품을 조회했지만 공동 크레딧 관계가 충분하지 않아 협업 통계를 표시하지 않습니다.`,
+  };
 }
 
 export async function getCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
@@ -413,7 +436,7 @@ export async function getCreatorProfile(input: { creatorId: string; name: string
     ? await getCreditsFmCreatorProfile(input)
     : input.creatorId.startsWith("mbid:")
       ? await getMusicBrainzCreatorProfile(input)
-      : { creator: { id: input.creatorId, name: input.name, roles: input.roles }, works: [], collaborators: [], network: { nodes: [], edges: [] }, scannedWorks: 0, confidence: "limited", sourceNote: "공개 카탈로그와 연결할 고유 식별자가 없습니다." };
+      : { creator: { id: input.creatorId, name: input.name, roles: input.roles }, works: [], collaborators: [], network: { nodes: [], edges: [] }, scannedWorks: 0, confidence: "limited", worksOrder: "catalog", sourceNote: "공개 카탈로그와 연결할 고유 식별자가 없습니다." };
 }
 
 async function musicBrainzFallback(title: string, artist?: string): Promise<MusicAnalysis> {
