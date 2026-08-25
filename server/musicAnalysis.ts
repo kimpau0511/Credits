@@ -1,6 +1,7 @@
 const MUSICBRAINZ_BASE_URL = "https://musicbrainz.org/ws/2";
 const MUSICBRAINZ_USER_AGENT = "CreatorSignal/0.3 (songwriting credit explorer)";
 const CREDITS_FM_BASE_URL = "https://api.credits.fm/v1";
+const CREDITS_FM_API_KEY = process.env.CREDITS_FM_API_KEY?.trim();
 const CACHE_TTL_MS = 1000 * 60 * 20;
 const CREATOR_SCAN_LIMIT = 12;
 
@@ -132,7 +133,9 @@ async function musicBrainzRequest<T>(path: string): Promise<T> {
 
 async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lookup"): Promise<T> {
   enforceCreditsRateLimit(kind);
-  const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { headers: { Accept: "application/json" } });
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (CREDITS_FM_API_KEY) headers["x-api-key"] = CREDITS_FM_API_KEY;
+  const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { headers });
   if (!response.ok) throw new Error(response.status === 429 ? "CREDITS_RATE_LIMIT" : `CREDITS_FM_${response.status}`);
   return response.json() as Promise<T>;
 }
