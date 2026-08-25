@@ -42,8 +42,25 @@ describe("music credit normalization", () => {
       "limited",
     );
     assert.match(briefing, /확정된 송라이팅 크레딧을 찾지 못했습니다/);
-    assert.match(briefing, /상세 송라이팅 크레딧이 제한적입니다/);
-    assert.match(briefing, /검색 결과를 데이터베이스나 파일에 저장하지 않으며/);
+    assert.match(briefing, /교차 확인하는 것이 우선입니다/);
+    assert.match(briefing, /누락 가능성이 있습니다/);
+  });
+
+  it("turns verified credits into a structured research insight", () => {
+    const briefing = buildBriefing(
+      { id: "track", title: "Signal", artist: "Artist" },
+      [
+        { creatorId: "writer", name: "Writer", role: "작사·작곡", source: "Credits.fm" },
+        { creatorId: "producer", name: "Producer", role: "프로듀싱", source: "Credits.fm" },
+        { creatorId: "artist", name: "Artist", role: "아티스트", source: "Credits.fm" },
+      ],
+      "enriched",
+    );
+    assert.match(briefing, /핵심 요약/);
+    assert.match(briefing, /송라이팅에는 1명이/);
+    assert.match(briefing, /Writer 중심의 송라이팅 구조/);
+    assert.match(briefing, /Producer\(프로듀싱\)/);
+    assert.match(briefing, /계약상 지분이나 실제 기여량을 의미하지 않습니다/);
   });
 
   it("aggregates repeated creator co-occurrences without duplicate nodes", () => {

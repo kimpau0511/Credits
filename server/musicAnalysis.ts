@@ -277,10 +277,45 @@ export function buildCooccurrenceNetwork(workCreditSets: MusicCredit[][]): { nod
 }
 
 export function buildBriefing(track: MusicAnalysis["track"], credits: MusicCredit[], status: MusicAnalysis["creditsStatus"]) {
-  const songwriters = credits.filter(credit => ["작사", "작곡", "작사·작곡"].includes(credit.role));
-  const people = songwriters.length ? songwriters.map(credit => `${credit.name}(${credit.role})`).join(", ") : "확정된 송라이팅 크레딧을 찾지 못했습니다";
-  const scope = status === "enriched" ? "확인된 작사·작곡 크레딧을 우선 노출합니다." : "현재 소스에서는 상세 송라이팅 크레딧이 제한적입니다.";
-  return `SONGWRITING SIGNAL\n${track.title}의 우선 확인 대상은 ${people}입니다. ${scope}\n\nCREATOR TRAIL\n크리에이터를 선택하면 공개 카탈로그의 표본 참여작과, 같은 표본에서 반복 등장한 동시 크레딧을 확인할 수 있습니다.\n\nREADING NOTE\n검색할 때 외부 API에서 받은 공개 데이터만 메모리에서 정리합니다. 검색 결과를 데이터베이스나 파일에 저장하지 않으며, 서버를 재시작하면 캐시도 초기화됩니다.`;
+  const people = Array.from(credits.reduce((map, credit) => {
+    const person = map.get(credit.creatorId) ?? { name: credit.name, roles: new Set<CreditRole>() };
+    person.roles.add(credit.role);
+    map.set(credit.creatorId, person);
+    return map;
+  }, new Map<string, { name: string; roles: Set<CreditRole> }>()).values()).map(person => ({
+    name: person.name,
+    roles: Array.from(person.roles),
+  }));
+  const songwritingRoles: CreditRole[] = ["작사", "작곡", "작사·작곡"];
+  const productionRoles: CreditRole[] = [...songwritingRoles, "편곡", "프로듀싱"];
+  const songwriters = people.filter(person => person.roles.some(role => songwritingRoles.includes(role)));
+  const productionPeople = people.filter(person => person.roles.some(role => productionRoles.includes(role)));
+  const combinedWriters = songwriters.filter(person => person.roles.includes("작사·작곡") || (person.roles.includes("작사") && person.roles.includes("작곡")));
+  const lead = [...productionPeople].sort((first, second) => {
+    const roleScore = (person: typeof first) => person.roles.filter(role => productionRoles.includes(role)).length;
+    return roleScore(second) - roleScore(first) || first.name.localeCompare(second.name);
+  })[0];
+  const songwriterNames = songwriters.map(person => `${person.name}(${person.roles.filter(role => songwritingRoles.includes(role)).join("·")})`).join(", ");
+  const supportingRoles = productionPeople.flatMap(person => person.roles
+    .filter(role => ["편곡", "프로듀싱"].includes(role))
+    .map(role => `${person.name}(${role})`));
+
+  const summary = songwriters.length
+    ? `${track.title}에서 확인된 고유 참여자는 ${people.length}명이며, 송라이팅에는 ${songwriters.length}명이 이름을 올렸습니다. 핵심 송라이팅 크레딧은 ${songwriterNames}입니다.`
+    : `${track.title}에서 확인된 고유 참여자는 ${people.length}명이지만, 현재 응답에서는 확정된 송라이팅 크레딧을 찾지 못했습니다.`;
+  const structure = songwriters.length > 1
+    ? `${songwriters.length}명이 참여한 공동 송라이팅 구조입니다.${combinedWriters.length ? ` 이 가운데 ${combinedWriters.map(person => person.name).join(", ")}은(는) 작사와 작곡을 함께 담당해 곡의 창작 방향에 걸친 역할 중첩이 확인됩니다.` : " 작사와 작곡이 인물별로 분리된 구조인지 각 크리에이터의 역할을 교차 확인할 필요가 있습니다."}`
+    : songwriters.length === 1
+      ? `${songwriters[0].name} 중심의 송라이팅 구조로 확인됩니다.${combinedWriters.length ? " 작사와 작곡을 함께 맡아 창작 관여 범위가 넓습니다." : " 표시된 역할 범위 안에서 단독 기여 여부를 추가 확인할 가치가 있습니다."}`
+      : "송라이팅 구조를 판단할 정보가 부족하므로 다른 표기, ISRC 또는 보조 출처로 교차 확인하는 것이 우선입니다.";
+  const researchPoint = lead
+    ? `${lead.name}은(는) 확인된 제작 역할이 가장 넓은 우선 조사 대상입니다. 인물 카드를 선택해 최근 작업과 반복 협업자를 확인하면 이 곡이 기존 작업 네트워크의 연장선인지 판단할 수 있습니다.${supportingRoles.length ? ` 편곡·프로듀싱 층에서는 ${supportingRoles.join(", ")}도 함께 확인됩니다.` : ""}`
+    : "현재 데이터만으로 우선 조사할 제작 인물을 특정하기 어렵습니다.";
+  const caveat = status === "enriched"
+    ? "공개 API에서 상세 제작 크레딧이 확인된 결과입니다. 아래 판단은 표시된 크레딧을 기준으로 하며 계약상 지분이나 실제 기여량을 의미하지 않습니다."
+    : "현재 소스의 상세 제작 크레딧이 제한적이므로 누락 가능성이 있습니다. 다른 API나 공식 라이너 노트와의 교차 검증이 필요합니다.";
+
+  return `핵심 요약\n${summary}\n\n크레딧 구조\n${structure}\n\n리서치 포인트\n${researchPoint}\n\n해석 범위\n${caveat}`;
 }
 
 async function findArtistCatalog(artistId?: string): Promise<TopTrack[]> {
