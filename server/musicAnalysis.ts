@@ -416,6 +416,47 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
   return result;
 }
 
+async function getMusicBrainzArtistProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
+  const id = input.creatorId.replace("mbid:", "");
+  const recordings: MbRecording[] = [];
+  let totalRecordings = 0;
+  while (recordings.length < MUSICBRAINZ_MAX_CREATOR_WORKS) {
+    const offset = recordings.length;
+    const response = await musicBrainzRequest<{ recordings?: MbRecording[]; "recording-count"?: number }>(`/recording?artist=${encodeURIComponent(id)}&limit=100&offset=${offset}&inc=artist-credits&fmt=json`);
+    const page = response.recordings ?? [];
+    totalRecordings = response["recording-count"] ?? page.length;
+    recordings.push(...page);
+    if (!page.length || recordings.length >= totalRecordings) break;
+  }
+  const exactRecordings = recordings.filter(recording => recording["artist-credit"]?.some(credit => credit.artist?.id === id));
+  const byTitle = new Map<string, MbRecording>();
+  for (const recording of exactRecordings) {
+    const key = normalizedText(recording.title);
+    const existing = byTitle.get(key);
+    if (!existing || (recording["first-release-date"] ?? "9999") < (existing["first-release-date"] ?? "9999")) byTitle.set(key, recording);
+  }
+  const uniqueRecordings = Array.from(byTitle.values());
+  const creditSets = uniqueRecordings.map(recording => consolidateMusicCredits(performanceCredits(recording)).filter(credit => credit.role === "아티스트"));
+  const network = buildCooccurrenceNetwork(creditSets);
+  const collaborators = network.edges.filter(edge => edge.source === input.creatorId || edge.target === input.creatorId).map(edge => {
+    const collaboratorId = edge.source === input.creatorId ? edge.target : edge.source;
+    const node = network.nodes.find(candidate => candidate.id === collaboratorId);
+    return node ? { creatorId: node.id, name: node.name, roles: node.roles, workCount: edge.weight, sharePercent: Math.round((edge.weight / Math.max(uniqueRecordings.length, 1)) * 100) } : undefined;
+  }).filter((item): item is CollaboratorSignal => Boolean(item)).sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 5);
+  const works = uniqueRecordings.map(recording => ({ id: recording.id, title: recording.title, releaseDate: recording["first-release-date"], relevance: 0 }))
+    .sort((first, second) => (second.releaseDate ?? "").localeCompare(first.releaseDate ?? "") || first.title.localeCompare(second.title));
+  return {
+    creator: { id: input.creatorId, name: input.name, roles: input.roles },
+    works: works.slice(0, CREATOR_SCAN_LIMIT),
+    collaborators,
+    network,
+    scannedWorks: uniqueRecordings.length,
+    confidence: "verified",
+    worksOrder: "recent",
+    sourceNote: `MusicBrainz에서 최대 500개 한도로 ${recordings.length}${recordings.length < totalRecordings ? `/${totalRecordings}` : ""}개 녹음을 조회하고, ${input.name}의 아티스트 ID가 실제 크레딧에 포함된 ${exactRecordings.length}개만 남겼습니다. 동일 제목을 원 발매일 기준으로 정리한 고유 곡은 ${uniqueRecordings.length}개입니다. 협업 통계는 공동 아티스트 크레딧 기준입니다.`,
+  };
+}
+
 async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
   const id = input.creatorId.replace("mbid:", "");
   const works: MbWork[] = [];
@@ -474,10 +515,13 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
 }
 
 export async function getCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
+  const hasSongwritingRole = input.roles.some(role => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(role));
   return input.creatorId.startsWith("ipi:")
     ? await getCreditsFmCreatorProfile(input)
     : input.creatorId.startsWith("mbid:")
-      ? await getMusicBrainzCreatorProfile(input)
+      ? input.roles.includes("아티스트") && !hasSongwritingRole
+        ? await getMusicBrainzArtistProfile(input)
+        : await getMusicBrainzCreatorProfile(input)
       : { creator: { id: input.creatorId, name: input.name, roles: input.roles }, works: [], collaborators: [], network: { nodes: [], edges: [] }, scannedWorks: 0, confidence: "limited", worksOrder: "catalog", sourceNote: "공개 카탈로그와 연결할 고유 식별자가 없습니다." };
 }
 
