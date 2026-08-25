@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildBriefing,
+  buildArtistCollaborations,
   buildCooccurrenceNetwork,
   consolidateMusicCredits,
   normalizeCreditRole,
@@ -93,6 +94,21 @@ describe("music credit normalization", () => {
       network.edges.find(edge => edge.source === "a" && edge.target === "b")?.weight,
       2,
     );
+  });
+
+  it("ranks artists separately by unique works and keeps recent evidence", () => {
+    const result = buildArtistCollaborations([
+      { work: { id: "w1", title: "First", releaseDate: "2024-01-01", relevance: 0 }, artists: [{ id: "iu", name: "IU" }, { id: "iu", name: "IU" }] },
+      { work: { id: "w2", title: "Second", releaseDate: "2025-02-03", relevance: 0 }, artists: [{ id: "iu", name: "IU" }, { id: "guest", name: "Guest" }] },
+      { work: { id: "w3", title: "Third", releaseDate: "2023-03-01", relevance: 0 }, artists: [{ id: "guest", name: "Guest" }] },
+      { work: { id: "w4", title: "Fourth", releaseDate: "2025-04-01", relevance: 0 }, artists: [{ id: "iu", name: "IU" }] },
+    ]);
+    assert.equal(result[0].name, "IU");
+    assert.equal(result[0].workCount, 3);
+    assert.equal(result[0].sharePercent, 75);
+    assert.equal(result[0].latestReleaseDate, "2025-04-01");
+    assert.deepEqual(result[0].works.map(work => work.title), ["Fourth", "Second", "First"]);
+    assert.equal(result[1].workCount, 2);
   });
 
   it("merges stage and legal names into one creator with combined roles", () => {

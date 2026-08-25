@@ -24,19 +24,40 @@ function Donut({ collaborators, scannedWorks }: { collaborators: Array<{ creator
   return <div className="mt-5 grid gap-5 sm:grid-cols-[132px_1fr] sm:items-center"><div className="relative mx-auto size-32 rounded-full" style={{ background: `conic-gradient(${slices.join(",")})` }}><div className="absolute inset-[28%] flex flex-col items-center justify-center rounded-full bg-[#ecece8]"><span className="text-2xl font-black">{ranked.length}</span><span className="text-[9px] text-black/50">{text("상대", "partners")}</span></div></div><div className="space-y-2">{ranked.map((item, index) => <div key={item.creatorId} className="grid grid-cols-[10px_1fr_auto] items-center gap-2 text-xs"><span className="size-2.5" style={{ background: tones[index] }} /><span className="truncate font-semibold">{item.name} <span className="font-normal text-black/50">{item.roles.join(" · ")}</span></span><span>{Math.round(item.workCount / total * 100)}%</span></div>)}</div><p className="sm:col-span-2 border-t border-black/15 pt-3 text-[11px] leading-5 text-black/55">{text(`조회한 ${scannedWorks}개 작품에서 함께 나타난 공동 크레딧의 합계를 100%로 환산했습니다.`, `Calculated from co-credit appearances across ${scannedWorks} retrieved works; this is not a market-share or royalty split.`)}</p></div>;
 }
 
+function ArtistCollaborationPanel({ profile }: { profile: CreatorProfile }) {
+  const { text } = useLanguage();
+  const artists = profile.artistCollaborations.slice(0, 8);
+  if (!artists.length) return null;
+  const leader = artists[0];
+  const max = Math.max(...artists.map(artist => artist.workCount), 1);
+  return <div className="mt-7 border-t-2 border-black pt-5">
+    <p className="text-[11px] font-mono text-black/50">{text("아티스트별 협업", "ARTIST COLLABORATIONS")}</p>
+    <div className="mt-4 bg-black p-5 text-white">
+      <p className="text-[10px] font-mono text-white/50">{text("가장 많이 작업한 아티스트", "MOST-FREQUENT ARTIST")}</p>
+      <div className="mt-3 flex items-end justify-between gap-4"><strong className="text-3xl leading-none">{leader.name}</strong><span className="shrink-0 font-mono text-sm">{leader.workCount}{text("곡", " works")}</span></div>
+      <p className="mt-3 text-xs text-white/60">{text(`확인된 ${profile.scannedWorks}개 작품 중 ${leader.sharePercent}%`, `${leader.sharePercent}% of ${profile.scannedWorks} verified works`)} · {text("최근", "latest")} {date(leader.latestReleaseDate)}</p>
+    </div>
+    <div className="mt-5 space-y-4">{artists.map((artist, index) => <div key={artist.artistId} className="border-b border-black/15 pb-4">
+      <div className="flex items-baseline justify-between gap-3 text-sm"><span className="truncate"><b className="mr-2 text-black/35">{String(index + 1).padStart(2, "0")}</b><strong>{artist.name}</strong></span><span className="shrink-0 font-mono text-xs">{artist.workCount}{text("곡", " works")} · {artist.sharePercent}%</span></div>
+      <div className="mt-2 h-1.5 bg-black/10"><div className="h-full bg-black" style={{ width: `${Math.max(artist.workCount / max * 100, 4)}%` }} /></div>
+      <p className="mt-2 truncate text-[11px] text-black/50">{artist.works.map(work => work.title).join(" · ") || text("대표 작품 미확인", "No representative works")}{artist.latestReleaseDate ? ` · ${date(artist.latestReleaseDate)}` : ""}</p>
+    </div>)}</div>
+    <p className="mt-4 text-[11px] leading-5 text-black/50">{text("한 작품에 같은 아티스트가 여러 번 표기되어도 1회로 계산합니다. 공동 작곡가·작사가 통계와 분리된 수치입니다.", "Each artist counts once per work. These figures are separate from co-writer and co-producer statistics.")}</p>
+  </div>;
+}
+
 function CollaborationBars({ collaborators }: { collaborators: CreatorProfile["collaborators"] }) {
   const { text } = useLanguage();
   const max = Math.max(...collaborators.map(item => item.workCount), 1);
   if (!collaborators.length) return null;
-  return <div className="mt-6 border-t border-black/15 pt-5"><p className="text-[11px] font-mono text-black/50">{text("최다 협업 순위", "TOP COLLABORATORS")}</p><div className="mt-4 space-y-3">{collaborators.map((item, index) => <div key={item.creatorId}><div className="mb-1.5 flex items-center justify-between gap-3 text-xs"><span className="truncate"><b className="mr-2 text-black/40">{String(index + 1).padStart(2, "0")}</b>{item.name}</span><span className="shrink-0 font-mono">{item.workCount}{text("회", " works")}</span></div><div className="h-2 bg-black/10"><div className="h-full bg-black" style={{ width: `${Math.max(item.workCount / max * 100, 4)}%` }} /></div></div>)}</div></div>;
+  return <div className="mt-6 border-t border-black/15 pt-5"><p className="text-[11px] font-mono text-black/50">{text("공동 창작자 협업 순위", "TOP CO-CREATORS")}</p><div className="mt-4 space-y-3">{collaborators.map((item, index) => <div key={item.creatorId}><div className="mb-1.5 flex items-center justify-between gap-3 text-xs"><span className="truncate"><b className="mr-2 text-black/40">{String(index + 1).padStart(2, "0")}</b>{item.name}</span><span className="shrink-0 font-mono">{item.workCount}{text("회", " works")}</span></div><div className="h-2 bg-black/10"><div className="h-full bg-black" style={{ width: `${Math.max(item.workCount / max * 100, 4)}%` }} /></div></div>)}</div></div>;
 }
 
 function CreatorNetwork({ profile }: { profile: CreatorProfile }) {
   const { text } = useLanguage();
   const collaborators = profile.collaborators.slice(0, 8);
-  if (!collaborators.length) return null;
   const points = collaborators.map((item, index) => { const angle = Math.PI * 2 * index / collaborators.length - Math.PI / 2; return { ...item, x: 50 + Math.cos(angle) * 34, y: 50 + Math.sin(angle) * 34 }; });
-  return <div className="mt-6 border-t border-black/15 pt-5"><p className="text-[11px] font-mono text-black/50">{text("협업 관계 그래프", "COLLABORATION GRAPH")}</p><svg className="mt-3 h-64 w-full" viewBox="0 0 100 100" role="img" aria-label={text(`${profile.creator.name}의 주요 협업 관계`, `Top collaborators for ${profile.creator.name}`)}>{points.map(point => <line key={`line-${point.creatorId}`} x1="50" y1="50" x2={point.x} y2={point.y} stroke="rgba(0,0,0,.3)" strokeWidth={Math.min(1 + point.workCount * .35, 3)} />)}<circle cx="50" cy="50" r="9" fill="#0a0a0a" /><text x="50" y="51" textAnchor="middle" dominantBaseline="middle" fill="white" fontSize="4">{profile.creator.name.slice(0, 11)}</text>{points.map(point => <g key={point.creatorId}><circle cx={point.x} cy={point.y} r={4 + Math.min(point.workCount, 5) * .45} fill="#ecece8" stroke="#0a0a0a" strokeWidth=".7" /><text x={point.x} y={point.y + 9} textAnchor="middle" fill="#0a0a0a" fontSize="3.3">{point.name.slice(0, 12)}</text></g>)}</svg></div>;
+  return <><ArtistCollaborationPanel profile={profile} />{collaborators.length > 0 && <div className="mt-6 border-t border-black/15 pt-5"><p className="text-[11px] font-mono text-black/50">{text("공동 창작자 관계 그래프", "CO-CREATOR GRAPH")}</p><svg className="mt-3 h-64 w-full" viewBox="0 0 100 100" role="img" aria-label={text(`${profile.creator.name}의 주요 공동 창작자`, `Top co-creators for ${profile.creator.name}`)}>{points.map(point => <line key={`line-${point.creatorId}`} x1="50" y1="50" x2={point.x} y2={point.y} stroke="rgba(0,0,0,.3)" strokeWidth={Math.min(1 + point.workCount * .35, 3)} />)}<circle cx="50" cy="50" r="9" fill="#0a0a0a" /><text x="50" y="51" textAnchor="middle" dominantBaseline="middle" fill="white" fontSize="4">{profile.creator.name.slice(0, 11)}</text>{points.map(point => <g key={point.creatorId}><circle cx={point.x} cy={point.y} r={4 + Math.min(point.workCount, 5) * .45} fill="#ecece8" stroke="#0a0a0a" strokeWidth=".7" /><text x={point.x} y={point.y + 9} textAnchor="middle" fill="#0a0a0a" fontSize="3.3">{point.name.slice(0, 12)}</text></g>)}</svg></div>}</>;
 }
 
 function Network({ analysis, selected, onSelect }: { analysis: MusicAnalysis; selected?: string; onSelect: (node: NetworkNode) => void }) {

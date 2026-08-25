@@ -35,10 +35,19 @@ export type NetworkEdge = { source: string; target: string; weight: number };
 export type TopTrack = { id: string; title: string; releaseDate?: string; relevance: number };
 export type TrackCandidate = { id: string; title: string; artist: string; releaseDate?: string; source: "Credits.fm" | "MusicBrainz"; isrc?: string };
 export type CollaboratorSignal = { creatorId: string; name: string; roles: CreditRole[]; workCount: number; sharePercent: number };
+export type ArtistCollaborationSignal = {
+  artistId: string;
+  name: string;
+  workCount: number;
+  sharePercent: number;
+  latestReleaseDate?: string;
+  works: TopTrack[];
+};
 export type CreatorProfile = {
   creator: { id: string; name: string; roles: CreditRole[] };
   works: TopTrack[];
   collaborators: CollaboratorSignal[];
+  artistCollaborations: ArtistCollaborationSignal[];
   network: { nodes: NetworkNode[]; edges: NetworkEdge[] };
   scannedWorks: number;
   confidence: "verified" | "limited";
@@ -106,6 +115,41 @@ function creatorIdentityKey(credit: MusicCredit) {
   if (credit.externalIpi) return `ipi:${credit.externalIpi}`;
   if (credit.externalMbid) return `mbid:${credit.externalMbid}`;
   return `name:${normalizedName}`;
+}
+
+export function buildArtistCollaborations(rows: Array<{
+  work: TopTrack;
+  artists: Array<{ id?: string; name: string }>;
+}>): ArtistCollaborationSignal[] {
+  const artists = new Map<string, { artistId: string; name: string; works: Map<string, TopTrack> }>();
+  for (const row of rows) {
+    const seen = new Set<string>();
+    for (const artist of row.artists) {
+      const normalizedName = normalizedText(artist.name);
+      if (!normalizedName) continue;
+      const artistId = artist.id ? `mbid:${artist.id.replace(/^mbid:/, "")}` : `artist:${normalizedName}`;
+      const identity = artist.id ? artistId : `name:${normalizedName}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      const current = artists.get(identity) ?? { artistId, name: artist.name, works: new Map<string, TopTrack>() };
+      current.works.set(row.work.id, row.work);
+      artists.set(identity, current);
+    }
+  }
+  const totalWorks = Math.max(new Set(rows.map(row => row.work.id)).size, 1);
+  return Array.from(artists.values()).map(artist => {
+    const works = Array.from(artist.works.values()).sort((first, second) =>
+      (second.releaseDate ?? "").localeCompare(first.releaseDate ?? "") || first.title.localeCompare(second.title));
+    return {
+      artistId: artist.artistId,
+      name: artist.name,
+      workCount: works.length,
+      sharePercent: Math.round(works.length / totalWorks * 100),
+      latestReleaseDate: works.find(work => work.releaseDate)?.releaseDate,
+      works: works.slice(0, 3),
+    };
+  }).sort((first, second) => second.workCount - first.workCount ||
+    (second.latestReleaseDate ?? "").localeCompare(first.latestReleaseDate ?? "") || first.name.localeCompare(second.name));
 }
 
 function preferredCreatorId(credits: MusicCredit[]) {
@@ -428,12 +472,16 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
     works: sampleRows.map(row => ({ id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 })).slice(0, 6),
     collaborators,
+    artistCollaborations: confidence === "verified" ? buildArtistCollaborations(sampleRows.map(row => ({
+      work: { id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 },
+      artists: (row.recording.artist_names ?? []).map(name => ({ name })),
+    }))) : [],
     network,
     scannedWorks: sampleRows.length,
     confidence,
     worksOrder: confidence === "verified" ? "recent" : "catalog",
     sourceNote: confidence === "verified"
-      ? `Credits.fm IPI 카탈로그 ${catalogIsrcs.length}건 중 식별자가 일치하는 ${rows.length}건을 확인하고, 날짜순 최근 ${sampleRows.length}건의 동시 크레딧을 집계했습니다. 표본 기반 결과이므로 전체 경력 통계와 다를 수 있습니다.`
+      ? `Credits.fm IPI 카탈로그 ${catalogIsrcs.length}건 중 식별자가 일치하는 ${rows.length}건을 확인하고, 날짜순 최근 ${sampleRows.length}건에서 아티스트별 작업 횟수와 동시 크레딧을 각각 집계했습니다. 표본 기반 결과이므로 전체 경력 통계와 다를 수 있습니다.`
       : `Credits.fm IPI 카탈로그에서 식별자가 일치하는 작품 ${rows.length}건을 찾았지만 발매일이 확인된 작품은 ${datedWorks}건뿐입니다. 최근 작업 순서와 반복 협업 통계의 신뢰 조건이 부족해 협업 비율·순위·그래프는 표시하지 않습니다.`,
   };
   creatorCache.set(input.creatorId, { createdAt: Date.now(), result });
@@ -473,6 +521,7 @@ async function getMusicBrainzArtistProfile(input: { creatorId: string; name: str
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
     works: works.slice(0, CREATOR_SCAN_LIMIT),
     collaborators,
+    artistCollaborations: [],
     network,
     scannedWorks: uniqueRecordings.length,
     confidence: "verified",
@@ -511,6 +560,7 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
     if (recording) recordingToWork.set(recording.id, work.id);
   }
   const releaseDates = new Map<string, string>();
+  const workArtists = new Map<string, Array<{ id?: string; name: string }>>();
   const recordingIds = Array.from(recordingToWork.keys());
   for (let start = 0; start < recordingIds.length; start += 20) {
     const chunk = recordingIds.slice(start, start + 20);
@@ -520,6 +570,7 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
       const workId = recordingToWork.get(recording.id);
       const releaseDate = recording["first-release-date"];
       if (workId && releaseDate && (!releaseDates.get(workId) || releaseDate < releaseDates.get(workId)!)) releaseDates.set(workId, releaseDate);
+      if (workId) workArtists.set(workId, (recording["artist-credit"] ?? []).flatMap(credit => credit.artist ? [{ id: credit.artist.id, name: credit.artist.name || credit.name || "Unknown artist" }] : []));
     }
   }
   const datedWorks = verifiedWorks.map(work => ({ id: work.id, title: work.title, releaseDate: releaseDates.get(work.id), relevance: 0 }))
@@ -528,12 +579,16 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
     works: datedWorks.slice(0, CREATOR_SCAN_LIMIT),
     collaborators: confidence === "verified" ? collaborators : [],
+    artistCollaborations: confidence === "verified" ? buildArtistCollaborations(verifiedWorks.map(work => ({
+      work: { id: work.id, title: work.title, releaseDate: releaseDates.get(work.id), relevance: 0 },
+      artists: workArtists.get(work.id) ?? [],
+    }))) : [],
     network: confidence === "verified" ? network : { nodes: [], edges: [] },
     scannedWorks: verifiedWorks.length,
     confidence,
     worksOrder: releaseDates.size ? "recent" : "catalog",
     sourceNote: confidence === "verified"
-      ? `MusicBrainz에서 최대 500개 한도로 ${works.length}${works.length < totalWorks ? `/${totalWorks}` : ""}개를 조회하고, ${input.name}의 송라이팅 관계가 실제 확인된 ${verifiedWorks.length}개 작품만 집계했습니다. 대표 녹음 기준 발매일은 ${releaseDates.size}개 작품에서 확인했습니다.`
+      ? `MusicBrainz에서 최대 500개 한도로 ${works.length}${works.length < totalWorks ? `/${totalWorks}` : ""}개를 조회하고, ${input.name}의 송라이팅 관계가 실제 확인된 ${verifiedWorks.length}개 작품만 집계했습니다. 대표 녹음 기준 발매일은 ${releaseDates.size}개 작품에서 확인했으며, 해당 녹음의 아티스트 크레딧으로 아티스트별 협업 횟수를 계산했습니다.`
       : `MusicBrainz에서 최대 500개 한도로 조회한 뒤 ${input.name}의 송라이팅 관계가 실제 확인된 작품 ${verifiedWorks.length}개만 남겼지만, 공동 크레딧 관계가 충분하지 않아 협업 통계를 표시하지 않습니다.`,
   };
 }
@@ -560,6 +615,7 @@ function unavailableCreatorProfile(input: { creatorId: string; name: string; rol
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
     works: [],
     collaborators: [],
+    artistCollaborations: [],
     network: { nodes: [], edges: [] },
     scannedWorks: 0,
     confidence: "limited",
