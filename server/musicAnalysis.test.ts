@@ -4,6 +4,8 @@ import {
   buildBriefing,
   buildArtistCollaborations,
   buildCooccurrenceNetwork,
+  CANDIDATE_DISPLAY_LIMIT,
+  CANDIDATE_SEARCH_LIMIT,
   consolidateMusicCredits,
   normalizeCreditRole,
   normalizeCreditsFmRole,
@@ -12,6 +14,7 @@ import {
   PROFILE_SEARCH_MIN,
   RECENT_WORKS_LIMIT,
   profileKindForRoles,
+  rankTrackCandidates,
   selectBestCreditsRecording,
   selectBestMusicBrainzArtist,
   type MusicCredit,
@@ -28,6 +31,18 @@ describe("music credit normalization", () => {
     assert.equal(RECENT_WORKS_LIMIT, 12);
     assert.equal(PROFILE_SEARCH_MIN, 300);
     assert.equal(PROFILE_SEARCH_MAX, 500);
+    assert.equal(CANDIDATE_SEARCH_LIMIT, 100);
+    assert.equal(CANDIDATE_DISPLAY_LIMIT, 50);
+  });
+
+  it("ranks an exact title and requested artist ahead of generic short-title matches", () => {
+    const ranked = rankTrackCandidates([
+      { id: "unrelated", title: "Five Minutes (Her Rework)", artist: "Her", source: "Credits.fm" },
+      { id: "other", title: "HER", artist: "Other Artist", source: "Credits.fm" },
+      { id: "block-b", title: "H.E.R", artist: "Block B", source: "Credits.fm", isrc: "KRA491401408" },
+    ], "HER", "Block B");
+    assert.equal(ranked[0]?.id, "block-b");
+    assert.equal(ranked.at(-1)?.id, "unrelated");
   });
   it("maps known relationship labels into the credit taxonomy", () => {
     assert.equal(normalizeCreditRole("composer"), "작곡");

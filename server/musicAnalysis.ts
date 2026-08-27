@@ -6,6 +6,8 @@ const CACHE_TTL_MS = 1000 * 60 * 20;
 export const RECENT_WORKS_LIMIT = 12;
 export const PROFILE_SEARCH_MIN = 300;
 export const PROFILE_SEARCH_MAX = 500;
+export const CANDIDATE_SEARCH_LIMIT = 100;
+export const CANDIDATE_DISPLAY_LIMIT = 50;
 
 // External catalogs often describe one person with a stage name in performer
 // credits and a legal name in songwriting credits. Keep these aliases in the
@@ -70,7 +72,7 @@ export type MusicAnalysis = {
 type MbArtist = { id: string; name: string; score?: number; aliases?: Array<{ name?: string }> };
 type MbRelation = { type?: string; "target-type"?: string; artist?: MbArtist; work?: { id: string }; recording?: { id: string; title?: string } };
 type MbWork = { id: string; title: string; "first-release-date"?: string; relations?: MbRelation[] };
-type MbRecording = { id: string; title: string; length?: number; "first-release-date"?: string; "artist-credit"?: Array<{ artist?: MbArtist; name?: string }>; relations?: MbRelation[]; releases?: Array<{ title?: string; date?: string }>; genres?: Array<{ name?: string }> };
+type MbRecording = { id: string; title: string; score?: number; length?: number; "first-release-date"?: string; "artist-credit"?: Array<{ artist?: MbArtist; name?: string }>; relations?: MbRelation[]; releases?: Array<{ title?: string; date?: string }>; genres?: Array<{ name?: string }> };
 type CreditsSearchRecording = { isrc: string; title: string; artist_names?: string[]; release_date?: string };
 type CreditsSearchResponse = { recordings?: { items?: CreditsSearchRecording[] } };
 type CreditsSongwriter = { name: string; ipi?: string; role?: string };
@@ -314,6 +316,22 @@ export function selectBestCreditsRecording(candidates: CreditsSearchRecording[],
   })[0];
 }
 
+export function rankTrackCandidates(candidates: TrackCandidate[], title: string, artist?: string) {
+  const expectedTitle = normalizedText(title);
+  const expectedArtist = artist ? normalizedText(artist) : "";
+  const score = (candidate: TrackCandidate) => {
+    const candidateTitle = normalizedText(candidate.title);
+    const candidateArtist = normalizedText(candidate.artist);
+    const titleScore = candidateTitle === expectedTitle ? 1_000 : candidateTitle.startsWith(expectedTitle) ? 500 : candidateTitle.includes(expectedTitle) ? 250 : 0;
+    const artistScore = expectedArtist && candidateArtist.includes(expectedArtist) ? 600 : 0;
+    return titleScore + artistScore + (candidate.releaseDate ? 5 : 0) + (candidate.source === "Credits.fm" ? 1 : 0);
+  };
+  return candidates
+    .map((candidate, index) => ({ candidate, index, score: score(candidate) }))
+    .sort((first, second) => second.score - first.score || first.index - second.index)
+    .map(item => item.candidate);
+}
+
 function creditsFromCreditsFm(recording: CreditsIsrcResponse): MusicCredit[] {
   const credits = new Map<string, MusicCredit>();
   const performers = recording.performers ?? [];
@@ -351,8 +369,14 @@ async function creditsFmTrack(title: string, artist?: string): Promise<CreditsIs
 export async function searchMusicCandidates(input: { title: string; artist?: string }): Promise<TrackCandidate[]> {
   const title = input.title.trim();
   const artist = input.artist?.trim();
-  const query = [title, artist].filter(Boolean).join(" ");
-  const creditsSearch = await creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(query)}`, "search").catch(() => undefined);
+  const resolvedArtist = artist ? await resolveMusicBrainzIdentity(artist).catch(() => undefined) : undefined;
+  const searchArtist = resolvedArtist?.name ?? artist;
+  const query = [title, searchArtist].filter(Boolean).join(" ");
+  const musicBrainzQuery = searchArtist ? `recording:"${title}" AND artist:"${searchArtist}"` : `recording:"${title}"`;
+  const [creditsSearch, fallback] = await Promise.all([
+    creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(query)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 30_000).catch(() => undefined),
+    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(musicBrainzQuery)}&limit=25&fmt=json`).catch(() => undefined),
+  ]);
   const creditsCandidates = Array.from(new Map((creditsSearch?.recordings?.items ?? []).map(item => [item.isrc, {
     id: `isrc:${item.isrc}`,
     isrc: item.isrc,
@@ -361,16 +385,14 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
     releaseDate: item.release_date,
     source: "Credits.fm" as const,
   }])).values());
-  if (creditsCandidates.length) return creditsCandidates.slice(0, 8);
-
-  const fallback = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(artist ? `recording:"${title}" AND artist:"${artist}"` : `recording:"${title}"`)}&limit=8&fmt=json`);
-  return (fallback.recordings ?? []).map(recording => ({
+  const musicBrainzCandidates = (fallback?.recordings ?? []).map(recording => ({
     id: `mbid:${recording.id}`,
     title: recording.title,
     artist: primaryArtist(recording)?.name || artist || "Unknown artist",
     releaseDate: recording["first-release-date"],
     source: "MusicBrainz" as const,
   }));
+  return rankTrackCandidates([...creditsCandidates, ...musicBrainzCandidates], title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
 }
 
 function creditsFromArtistRelations(relations?: MbRelation[]): MusicCredit[] {
