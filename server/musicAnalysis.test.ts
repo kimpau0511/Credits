@@ -7,6 +7,7 @@ import {
   consolidateMusicCredits,
   normalizeCreditRole,
   normalizeCreditsFmRole,
+  musicBrainzNameVariants,
   profileKindForRoles,
   selectBestCreditsRecording,
   selectBestMusicBrainzArtist,
@@ -58,6 +59,21 @@ describe("music credit normalization", () => {
     assert.equal(selectBestMusicBrainzArtist(candidates, "완전히 다른 사람"), undefined);
   });
 
+  it("generates safe Korean romanized name-order variants", () => {
+    assert.deepEqual(musicBrainzNameVariants("CHAN HYEOK LEE"), ["CHAN HYEOK LEE", "LEE CHANHYEOK"]);
+    assert.deepEqual(musicBrainzNameVariants("CHOI RAE SEONG"), ["CHOI RAE SEONG", "CHOI RAESEONG"]);
+    assert.deepEqual(musicBrainzNameVariants("Taylor Swift"), ["Taylor Swift"]);
+  });
+
+  it("merges provider rows that share a name when one supplies the stable ID", () => {
+    const result = consolidateMusicCredits([
+      { creatorId: "artist:akmu", name: "AKMU", role: "아티스트", source: "Credits.fm" },
+      { creatorId: "mbid:akmu", externalMbid: "akmu", name: "AKMU", role: "연주", source: "Credits.fm" },
+    ]);
+    assert.equal(new Set(result.map(credit => credit.creatorId)).size, 1);
+    assert.deepEqual(result.map(credit => credit.role).sort(), ["아티스트", "연주"].sort());
+  });
+
   it("keeps the missing-credit state explicit", () => {
     const briefing = buildBriefing(
       { id: "missing", title: "Untitled work", artist: "Unknown artist" },
@@ -99,9 +115,9 @@ describe("music credit normalization", () => {
   it("ranks artists separately by unique works and keeps recent evidence", () => {
     const result = buildArtistCollaborations([
       { work: { id: "w1", title: "First", releaseDate: "2024-01-01", relevance: 0 }, artists: [{ id: "iu", name: "IU" }, { id: "iu", name: "IU" }] },
-      { work: { id: "w2", title: "Second", releaseDate: "2025-02-03", relevance: 0 }, artists: [{ id: "iu", name: "IU" }, { id: "guest", name: "Guest" }] },
+      { work: { id: "w2", title: "Second", releaseDate: "2025-02-03", relevance: 0 }, artists: [{ id: "iu", name: "아이유" }, { id: "guest", name: "Guest" }] },
       { work: { id: "w3", title: "Third", releaseDate: "2023-03-01", relevance: 0 }, artists: [{ id: "guest", name: "Guest" }] },
-      { work: { id: "w4", title: "Fourth", releaseDate: "2025-04-01", relevance: 0 }, artists: [{ id: "iu", name: "IU" }] },
+      { work: { id: "w4", title: "Fourth", releaseDate: "2025-04-01", relevance: 0 }, artists: [{ name: "IU" }] },
     ]);
     assert.equal(result[0].name, "IU");
     assert.equal(result[0].workCount, 3);

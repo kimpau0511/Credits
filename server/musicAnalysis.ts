@@ -108,6 +108,28 @@ export function selectBestMusicBrainzArtist(candidates: MbArtist[], name: string
   });
 }
 
+const KOREAN_ROMANIZED_SURNAMES = new Set([
+  "ahn", "baek", "chang", "cho", "choi", "chung", "han", "hong", "hwang", "jang", "jeon", "jeong", "ji", "jo", "jung",
+  "kang", "kim", "ko", "kwak", "kwon", "lee", "lim", "moon", "nam", "oh", "park", "ryu", "seo", "shin", "song", "sung", "yoon",
+]);
+
+export function musicBrainzNameVariants(name: string): string[] {
+  const clean = name.trim().replace(/\s+/g, " ");
+  const tokens = clean.split(" ").filter(Boolean);
+  const variants = new Set([clean]);
+  if (tokens.length === 3) {
+    const first = tokens[0].toLowerCase();
+    const last = tokens[2].toLowerCase();
+    if (KOREAN_ROMANIZED_SURNAMES.has(last)) variants.add(`${tokens[2]} ${tokens[0]}${tokens[1]}`);
+    if (KOREAN_ROMANIZED_SURNAMES.has(first)) variants.add(`${tokens[0]} ${tokens[1]}${tokens[2]}`);
+  }
+  return Array.from(variants);
+}
+
+function selectBestMusicBrainzArtistForNames(candidates: MbArtist[], names: string[]) {
+  return names.map(name => selectBestMusicBrainzArtist(candidates, name)).find(Boolean);
+}
+
 function creatorIdentityKey(credit: MusicCredit) {
   const normalizedName = normalizedText(credit.name);
   const aliasGroup = CREATOR_ALIAS_GROUPS.find(group => group.aliases.some(alias => normalizedText(alias) === normalizedName));
@@ -122,13 +144,17 @@ export function buildArtistCollaborations(rows: Array<{
   artists: Array<{ id?: string; name: string }>;
 }>): ArtistCollaborationSignal[] {
   const artists = new Map<string, { artistId: string; name: string; works: Map<string, TopTrack> }>();
+  const identifiedByName = new Map<string, string>();
+  for (const artist of rows.flatMap(row => row.artists)) {
+    if (artist.id) identifiedByName.set(normalizedText(artist.name), `mbid:${artist.id.replace(/^mbid:/, "")}`);
+  }
   for (const row of rows) {
     const seen = new Set<string>();
     for (const artist of row.artists) {
       const normalizedName = normalizedText(artist.name);
       if (!normalizedName) continue;
       const artistId = artist.id ? `mbid:${artist.id.replace(/^mbid:/, "")}` : `artist:${normalizedName}`;
-      const identity = artist.id ? artistId : `name:${normalizedName}`;
+      const identity = artist.id ? artistId : identifiedByName.get(normalizedName) ?? `name:${normalizedName}`;
       if (seen.has(identity)) continue;
       seen.add(identity);
       const current = artists.get(identity) ?? { artistId, name: artist.name, works: new Map<string, TopTrack>() };
@@ -160,9 +186,15 @@ function preferredCreatorId(credits: MusicCredit[]) {
 }
 
 export function consolidateMusicCredits(credits: MusicCredit[]): MusicCredit[] {
+  const identifiedByName = new Map<string, string>();
+  for (const credit of credits) {
+    if (credit.externalIpi) identifiedByName.set(normalizedText(credit.name), `ipi:${credit.externalIpi}`);
+    else if (credit.externalMbid) identifiedByName.set(normalizedText(credit.name), `mbid:${credit.externalMbid}`);
+  }
   const people = new Map<string, MusicCredit[]>();
   for (const credit of credits) {
-    const key = creatorIdentityKey(credit);
+    const providerKey = creatorIdentityKey(credit);
+    const key = providerKey.startsWith("name:") ? identifiedByName.get(normalizedText(credit.name)) ?? providerKey : providerKey;
     people.set(key, [...(people.get(key) ?? []), credit]);
   }
 
@@ -215,18 +247,18 @@ async function musicBrainzRequest<T>(path: string): Promise<T> {
   throw lastError;
 }
 
-async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lookup", timeoutMs = 10_000): Promise<T> {
+async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lookup", timeoutMs = 15_000): Promise<T> {
   enforceCreditsRateLimit(kind);
   const headers: Record<string, string> = { Accept: "application/json" };
   if (CREDITS_FM_API_KEY) headers["x-api-key"] = CREDITS_FM_API_KEY;
-  const attempts = kind === "search" ? 2 : 1;
+  const attempts = 2;
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { headers, signal: AbortSignal.timeout(timeoutMs) });
       if (response.ok) return response.json() as Promise<T>;
       const error = new Error(response.status === 429 ? "CREDITS_RATE_LIMIT" : `CREDITS_FM_${response.status}`);
-      if (response.status !== 503 || attempt === attempts - 1) throw error;
+      if (response.status < 500 || attempt === attempts - 1) throw error;
       lastError = error;
     } catch (error) {
       lastError = error;
@@ -237,11 +269,11 @@ async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lo
   throw lastError;
 }
 
-async function creditsFmPost<T>(path: string, body: unknown): Promise<T> {
+async function creditsFmPost<T>(path: string, body: unknown, timeoutMs = 20_000): Promise<T> {
   enforceCreditsRateLimit("lookup");
   const headers: Record<string, string> = { Accept: "application/json", "Content-Type": "application/json" };
   if (CREDITS_FM_API_KEY) headers["x-api-key"] = CREDITS_FM_API_KEY;
-  const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(12_000) });
+  const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) throw new Error(response.status === 429 ? "CREDITS_RATE_LIMIT" : `CREDITS_FM_${response.status}`);
   return response.json() as Promise<T>;
 }
@@ -283,9 +315,14 @@ export function selectBestCreditsRecording(candidates: CreditsSearchRecording[],
 
 function creditsFromCreditsFm(recording: CreditsIsrcResponse): MusicCredit[] {
   const credits = new Map<string, MusicCredit>();
-  for (const artistName of recording.artist_names ?? []) {
-    const creatorId = `artist:${normalizedText(artistName)}`;
-    credits.set(`${creatorId}:아티스트`, { creatorId, name: artistName, role: "아티스트", source: "Credits.fm" });
+  const performers = recording.performers ?? [];
+  const artistNames = recording.artist_names ?? [];
+  for (let index = 0; index < artistNames.length; index += 1) {
+    const artistName = artistNames[index];
+    const performer = performers.find(candidate => normalizedText(candidate.name) === normalizedText(artistName))
+      ?? (performers.length === recording.artist_names?.length ? performers[index] : undefined);
+    const creatorId = performer?.mbid ? `mbid:${performer.mbid}` : `artist:${normalizedText(artistName)}`;
+    credits.set(`${creatorId}:아티스트`, { creatorId, name: artistName, role: "아티스트", source: "Credits.fm", externalMbid: performer?.mbid });
   }
   for (const songwriter of recording.songwriters ?? []) {
     const role = normalizeCreditsFmRole(songwriter.role);
@@ -444,8 +481,16 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
   let recordings: CreditsIsrcResponse[] = [];
   if (catalogIsrcs.length) {
     try {
-      const batch = await creditsFmPost<CreditsBatchResponse>("/batch", { isrcs: catalogIsrcs });
-      recordings = Object.values(batch.isrcs ?? {}).filter((recording): recording is CreditsIsrcResponse => "isrc" in recording && Boolean(recording.isrc));
+      const chunks = Array.from({ length: Math.ceil(catalogIsrcs.length / 20) }, (_, index) => catalogIsrcs.slice(index * 20, index * 20 + 20));
+      const batches = await Promise.allSettled(chunks.map(isrcs => creditsFmPost<CreditsBatchResponse>("/batch", { isrcs })));
+      const unique = new Map<string, CreditsIsrcResponse>();
+      for (const batch of batches) {
+        if (batch.status !== "fulfilled") continue;
+        for (const recording of Object.values(batch.value.isrcs ?? {})) {
+          if ("isrc" in recording && recording.isrc) unique.set(recording.isrc, recording);
+        }
+      }
+      recordings = Array.from(unique.values());
     } catch (error) {
       console.warn("[Creator Signal] Credits.fm batch profile fallback", error);
     }
@@ -459,30 +504,43 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
     .filter((recording): recording is CreditsIsrcResponse => "isrc" in recording && Boolean(recording.isrc))
     .map(recording => ({ recording, credits: creditsFromCreditsFm(recording) }))
     .sort((first, second) => (second.recording.release_date ?? "").localeCompare(first.recording.release_date ?? "") || first.recording.isrc.localeCompare(second.recording.isrc));
-  const datedWorks = rows.filter(row => Boolean(row.recording.release_date)).length;
-  const confidence = rows.length >= 3 && datedWorks >= Math.min(3, rows.length) ? "verified" : "limited";
-  const sampleRows = rows.slice(0, CREATOR_SCAN_LIMIT);
-  const network = confidence === "verified" ? buildCooccurrenceNetwork(sampleRows.map(row => row.credits)) : { nodes: [], edges: [] };
+  const uniqueByWork = new Map<string, typeof rows[number]>();
+  for (const row of rows) {
+    const title = row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc;
+    const artists = (row.recording.artist_names ?? []).map(normalizedText).sort().join(":");
+    const key = `${normalizedText(title)}:${artists}`;
+    const existing = uniqueByWork.get(key);
+    if (!existing || (row.recording.release_date ?? "9999") < (existing.recording.release_date ?? "9999")) uniqueByWork.set(key, row);
+  }
+  const uniqueRows = Array.from(uniqueByWork.values()).sort((first, second) =>
+    (second.recording.release_date ?? "").localeCompare(first.recording.release_date ?? "") || first.recording.isrc.localeCompare(second.recording.isrc));
+  const datedWorks = uniqueRows.filter(row => Boolean(row.recording.release_date)).length;
+  const confidence = uniqueRows.length >= 3 && datedWorks >= Math.min(3, uniqueRows.length) ? "verified" : "limited";
+  const sampleRows = uniqueRows.slice(0, CREATOR_SCAN_LIMIT);
+  const network = confidence === "verified" ? buildCooccurrenceNetwork(uniqueRows.map(row => row.credits)) : { nodes: [], edges: [] };
   const collaborators = network.edges.filter(edge => edge.source === input.creatorId || edge.target === input.creatorId).map(edge => {
     const collaboratorId = edge.source === input.creatorId ? edge.target : edge.source;
     const node = network.nodes.find(candidate => candidate.id === collaboratorId);
-    return node ? { creatorId: node.id, name: node.name, roles: node.roles, workCount: edge.weight, sharePercent: Math.round((edge.weight / Math.max(sampleRows.length, 1)) * 100) } : undefined;
+    return node ? { creatorId: node.id, name: node.name, roles: node.roles, workCount: edge.weight, sharePercent: Math.round((edge.weight / Math.max(uniqueRows.length, 1)) * 100) } : undefined;
   }).filter((item): item is CollaboratorSignal => Boolean(item)).sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 5);
   const result: CreatorProfile = {
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
     works: sampleRows.map(row => ({ id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 })).slice(0, 6),
     collaborators,
-    artistCollaborations: confidence === "verified" ? buildArtistCollaborations(sampleRows.map(row => ({
+    artistCollaborations: confidence === "verified" ? buildArtistCollaborations(uniqueRows.map(row => ({
       work: { id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 },
-      artists: (row.recording.artist_names ?? []).map(name => ({ name })),
+      artists: row.credits.filter(credit => credit.role === "아티스트").map(credit => ({
+        id: credit.externalMbid ?? (credit.creatorId.startsWith("mbid:") ? credit.creatorId.replace("mbid:", "") : undefined),
+        name: credit.name,
+      })),
     }))) : [],
     network,
-    scannedWorks: sampleRows.length,
+    scannedWorks: uniqueRows.length,
     confidence,
     worksOrder: confidence === "verified" ? "recent" : "catalog",
     sourceNote: confidence === "verified"
-      ? `Credits.fm IPI 카탈로그 ${catalogIsrcs.length}건 중 식별자가 일치하는 ${rows.length}건을 확인하고, 날짜순 최근 ${sampleRows.length}건에서 아티스트별 작업 횟수와 동시 크레딧을 각각 집계했습니다. 표본 기반 결과이므로 전체 경력 통계와 다를 수 있습니다.`
-      : `Credits.fm IPI 카탈로그에서 식별자가 일치하는 작품 ${rows.length}건을 찾았지만 발매일이 확인된 작품은 ${datedWorks}건뿐입니다. 최근 작업 순서와 반복 협업 통계의 신뢰 조건이 부족해 협업 비율·순위·그래프는 표시하지 않습니다.`,
+      ? `Credits.fm IPI 카탈로그 ${catalogIsrcs.length}건 중 식별자가 일치하는 녹음 ${rows.length}건을 확인하고, 동일 곡·아티스트 중복을 제거한 ${uniqueRows.length}개 작품 전체에서 아티스트별 작업 횟수와 동시 크레딧을 집계했습니다. 작품 목록은 최근 ${sampleRows.length}개만 표시합니다.`
+      : `Credits.fm IPI 카탈로그에서 식별자가 일치하는 고유 작품 ${uniqueRows.length}건을 찾았지만 발매일이 확인된 작품은 ${datedWorks}건뿐입니다. 최근 작업 순서와 반복 협업 통계의 신뢰 조건이 부족해 협업 비율·순위·그래프는 표시하지 않습니다.`,
   };
   creatorCache.set(input.creatorId, { createdAt: Date.now(), result });
   return result;
@@ -596,9 +654,10 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
 async function resolveMusicBrainzIdentity(name: string): Promise<MbArtist | undefined> {
   const key = normalizedText(name);
   if (identityCache.has(key)) return identityCache.get(key) ?? undefined;
-  const query = `artist:"${name.replace(/"/g, "")}"`;
+  const variants = musicBrainzNameVariants(name).map(value => value.replace(/"/g, ""));
+  const query = variants.flatMap(value => [`artist:"${value}"`, `alias:"${value}"`]).join(" OR ");
   const response = await musicBrainzRequest<{ artists?: MbArtist[] }>(`/artist?query=${encodeURIComponent(query)}&limit=10&fmt=json`);
-  const match = selectBestMusicBrainzArtist(response.artists ?? [], name);
+  const match = selectBestMusicBrainzArtistForNames(response.artists ?? [], variants);
   identityCache.set(key, match ?? null);
   return match;
 }
@@ -669,10 +728,19 @@ export async function getCreatorProfile(input: { creatorId: string; name: string
   return creditsProfile ?? unavailableCreatorProfile(input, "Credits.fm과 MusicBrainz에서 이 이름과 역할에 맞는 고유 인물 식별자를 확인하지 못했습니다. 다른 이름 표기나 공식 식별자가 필요합니다.");
 }
 
-async function musicBrainzFallback(title: string, artist?: string): Promise<MusicAnalysis> {
-  const query = artist ? `recording:"${title}" AND artist:"${artist}"` : `recording:"${title}"`;
-  const search = await musicBrainzRequest<{ recordings?: Array<Pick<MbRecording, "id">> }>(`/recording?query=${encodeURIComponent(query)}&limit=5&fmt=json`);
-  const match = search.recordings?.[0];
+async function musicBrainzFallback(title: string, artist?: string, isrc?: string): Promise<MusicAnalysis> {
+  let match: Pick<MbRecording, "id"> | undefined;
+  if (isrc) {
+    const lookup = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/isrc/${encodeURIComponent(isrc)}?inc=recordings+artist-credits&fmt=json`).catch(() => undefined);
+    const expectedArtist = artist ? normalizedText(artist) : "";
+    match = lookup?.recordings?.find(recording => !expectedArtist || (recording["artist-credit"] ?? []).some(credit => normalizedText(credit.artist?.name ?? credit.name ?? "").includes(expectedArtist)))
+      ?? lookup?.recordings?.[0];
+  }
+  if (!match) {
+    const query = artist ? `recording:"${title}" AND artist:"${artist}"` : `recording:"${title}"`;
+    const search = await musicBrainzRequest<{ recordings?: Array<Pick<MbRecording, "id">> }>(`/recording?query=${encodeURIComponent(query)}&limit=5&fmt=json`);
+    match = search.recordings?.[0];
+  }
   if (!match) throw new Error("TRACK_NOT_FOUND");
   const recording = await musicBrainzRequest<MbRecording>(`/recording/${encodeURIComponent(match.id)}?inc=artist-credits+recording-rels+work-rels+releases&fmt=json`);
   const workId = recording.relations?.find(relation => relation["target-type"] === "work")?.work?.id;
@@ -698,7 +766,7 @@ export async function analyzeMusic(input: { title: string; artist?: string; isrc
     const track = { id: creditsRecording.isrc, title: creditsRecording.song_title ?? creditsRecording.recording_title ?? title, artist: creditsRecording.artist_names?.join(", ") ?? artist ?? "Unknown artist", releaseDate: creditsRecording.release_date };
     const storedAt = Date.now();
     result = { track, credits, network: buildCooccurrenceNetwork([credits]), topTracks: [], briefing: buildBriefing(track, credits, detailed.length ? "enriched" : "limited"), sourceNote: `Credits.fm ISRC ${creditsRecording.isrc} 응답을 우선 사용했습니다. 원본 소스: ${(creditsRecording.sources ?? []).join(", ") || "Credits.fm"}.`, creditsStatus: detailed.length ? "enriched" : "limited", aiModel: "Rule-based credit editor", cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS } };
-  } else result = await musicBrainzFallback(title, artist);
+  } else result = await musicBrainzFallback(title, artist, input.isrc);
   analysisCache.set(key, { createdAt: result.cache.storedAt, result });
   return result;
 }
