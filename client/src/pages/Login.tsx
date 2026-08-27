@@ -24,10 +24,10 @@ export default function Login() {
   }
 
   return <main className="grid min-h-screen bg-[#101010] text-white lg:grid-cols-[1.1fr_.9fr]">
-    <section className="flex min-h-[42vh] flex-col justify-between border-b border-white/15 bg-[#191918] p-8 lg:min-h-screen lg:border-b-0 lg:border-r lg:p-14">
-      <strong className="text-xl">C/S</strong>
-      <div><p className="text-[10px] font-mono tracking-[.18em] text-white/45">MUSIC CREDIT INTELLIGENCE</p><h1 className="mt-5 max-w-xl text-5xl font-black leading-[.9] tracking-[-.06em] sm:text-7xl">수집한 곡이<br />리서치 자산이 됩니다.</h1><p className="mt-7 max-w-lg text-sm leading-7 text-white/55">곡을 검색하면 크레딧이 사용자별 수집함에 저장되고, 반복 참여자와 협업 패턴을 자동으로 정리합니다.</p></div>
-      <p className="text-xs text-white/35">CREATOR SIGNAL · PRIVATE RESEARCH WORKSPACE</p>
+    <section className="flex min-h-[46vh] flex-col justify-between border-b border-white/15 bg-[#191918] p-7 sm:p-10 lg:min-h-screen lg:border-b-0 lg:border-r lg:p-14">
+      <strong className="text-sm font-black tracking-[-.02em]">CReadits Search</strong>
+      <div className="py-12 lg:py-8"><p className="text-[10px] font-mono tracking-[.18em] text-white/45">CREDITS-LED MUSIC RESEARCH</p><h1 className="mt-5 max-w-2xl text-[clamp(3.25rem,8vw,7rem)] font-black leading-[.86] tracking-[-.055em]"><span className="block">CReadits</span><span className="block text-white/35">Search</span></h1><p className="mt-7 text-lg font-bold tracking-[-.03em] text-white/85 sm:text-xl">곡을 읽고, 크레딧을 연결하고, 리서치를 쌓습니다.</p><p className="mt-4 max-w-lg text-sm leading-7 text-white/55">곡을 검색하면 크레딧이 사용자별 수집함에 저장되고, 반복 참여자와 협업 패턴을 자동으로 정리합니다.</p></div>
+      <p className="text-[10px] font-mono tracking-[.08em] text-white/35">CReadits Search · PRIVATE RESEARCH WORKSPACE</p>
     </section>
     <section className="flex items-center justify-center p-6 sm:p-12"><form onSubmit={submit} className="w-full max-w-md border border-white/20 bg-[#181818] p-7 sm:p-10">
       <LockKeyhole className="size-7" /><p className="mt-8 text-[10px] font-mono tracking-[.15em] text-white/45">{mode === "login" ? "MEMBER LOGIN" : "CREATE ACCOUNT"}</p><h2 className="mt-3 text-3xl font-black">{mode === "login" ? "리서치 공간 로그인" : "계정 만들기"}</h2>
