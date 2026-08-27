@@ -8,6 +8,9 @@ import {
   normalizeCreditRole,
   normalizeCreditsFmRole,
   musicBrainzNameVariants,
+  PROFILE_SEARCH_MAX,
+  PROFILE_SEARCH_MIN,
+  RECENT_WORKS_LIMIT,
   profileKindForRoles,
   selectBestCreditsRecording,
   selectBestMusicBrainzArtist,
@@ -21,6 +24,11 @@ const credits: MusicCredit[] = [
 ];
 
 describe("music credit normalization", () => {
+  it("keeps recent display and catalog search limits explicit", () => {
+    assert.equal(RECENT_WORKS_LIMIT, 12);
+    assert.equal(PROFILE_SEARCH_MIN, 300);
+    assert.equal(PROFILE_SEARCH_MAX, 500);
+  });
   it("maps known relationship labels into the credit taxonomy", () => {
     assert.equal(normalizeCreditRole("composer"), "작곡");
     assert.equal(normalizeCreditRole("lyricist"), "작사");

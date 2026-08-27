@@ -3,8 +3,9 @@ const MUSICBRAINZ_USER_AGENT = "CreatorSignal/0.3 (songwriting credit explorer)"
 const CREDITS_FM_BASE_URL = "https://api.credits.fm/v1";
 const CREDITS_FM_API_KEY = process.env.CREDITS_FM_API_KEY?.trim();
 const CACHE_TTL_MS = 1000 * 60 * 20;
-const CREATOR_SCAN_LIMIT = 12;
-const MUSICBRAINZ_MAX_CREATOR_WORKS = 500;
+export const RECENT_WORKS_LIMIT = 12;
+export const PROFILE_SEARCH_MIN = 300;
+export const PROFILE_SEARCH_MAX = 500;
 
 // External catalogs often describe one person with a stage name in performer
 // credits and a legal name in songwriting credits. Keep these aliases in the
@@ -470,14 +471,14 @@ export function buildBriefing(track: MusicAnalysis["track"], credits: MusicCredi
 async function findArtistCatalog(artistId?: string): Promise<TopTrack[]> {
   if (!artistId) return [];
   const result = await musicBrainzRequest<{ recordings?: Array<Pick<MbRecording, "id" | "title" | "first-release-date"> & { score?: number }> }>(`/recording?artist=${encodeURIComponent(artistId)}&limit=12&fmt=json`);
-  return (result.recordings ?? []).map(recording => ({ id: recording.id, title: recording.title, releaseDate: recording["first-release-date"], relevance: Number(recording.score ?? 0) })).sort((a, b) => b.relevance - a.relevance || (b.releaseDate ?? "").localeCompare(a.releaseDate ?? "")).slice(0, 6);
+  return (result.recordings ?? []).map(recording => ({ id: recording.id, title: recording.title, releaseDate: recording["first-release-date"], relevance: Number(recording.score ?? 0) })).sort((a, b) => b.relevance - a.relevance || (b.releaseDate ?? "").localeCompare(a.releaseDate ?? "")).slice(0, RECENT_WORKS_LIMIT);
 }
 
 async function getCreditsFmCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
   const cached = creatorCache.get(input.creatorId);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return cached.result;
   const profile = await creditsFmRequest<CreditsIpiResponse>(`/ipi/${encodeURIComponent(input.creatorId.replace("ipi:", ""))}`);
-  const catalogIsrcs = Array.from(new Set(profile.isrcs ?? [])).slice(0, 100);
+  const catalogIsrcs = Array.from(new Set(profile.isrcs ?? [])).slice(0, PROFILE_SEARCH_MAX);
   let recordings: CreditsIsrcResponse[] = [];
   if (catalogIsrcs.length) {
     try {
@@ -496,7 +497,7 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
     }
   }
   if (!recordings.length) {
-    const fallback = await Promise.allSettled(catalogIsrcs.slice(0, CREATOR_SCAN_LIMIT).map(isrc => creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(isrc)}`)));
+    const fallback = await Promise.allSettled(catalogIsrcs.slice(0, Math.min(PROFILE_SEARCH_MIN, 20)).map(isrc => creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(isrc)}`)));
     recordings = fallback.filter((item): item is PromiseFulfilledResult<CreditsIsrcResponse> => item.status === "fulfilled").map(item => item.value);
   }
   const rows = recordings
@@ -516,7 +517,7 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
     (second.recording.release_date ?? "").localeCompare(first.recording.release_date ?? "") || first.recording.isrc.localeCompare(second.recording.isrc));
   const datedWorks = uniqueRows.filter(row => Boolean(row.recording.release_date)).length;
   const confidence = uniqueRows.length >= 3 && datedWorks >= Math.min(3, uniqueRows.length) ? "verified" : "limited";
-  const sampleRows = uniqueRows.slice(0, CREATOR_SCAN_LIMIT);
+  const sampleRows = uniqueRows.slice(0, RECENT_WORKS_LIMIT);
   const network = confidence === "verified" ? buildCooccurrenceNetwork(uniqueRows.map(row => row.credits)) : { nodes: [], edges: [] };
   const collaborators = network.edges.filter(edge => edge.source === input.creatorId || edge.target === input.creatorId).map(edge => {
     const collaboratorId = edge.source === input.creatorId ? edge.target : edge.source;
@@ -525,7 +526,7 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
   }).filter((item): item is CollaboratorSignal => Boolean(item)).sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 5);
   const result: CreatorProfile = {
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
-    works: sampleRows.map(row => ({ id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 })).slice(0, 6),
+    works: sampleRows.map(row => ({ id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 })).slice(0, RECENT_WORKS_LIMIT),
     collaborators,
     artistCollaborations: confidence === "verified" ? buildArtistCollaborations(uniqueRows.map(row => ({
       work: { id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 },
@@ -550,7 +551,7 @@ async function getMusicBrainzArtistProfile(input: { creatorId: string; name: str
   const id = input.creatorId.replace("mbid:", "");
   const recordings: MbRecording[] = [];
   let totalRecordings = 0;
-  while (recordings.length < MUSICBRAINZ_MAX_CREATOR_WORKS) {
+  while (recordings.length < PROFILE_SEARCH_MAX) {
     const offset = recordings.length;
     const response = await musicBrainzRequest<{ recordings?: MbRecording[]; "recording-count"?: number }>(`/recording?artist=${encodeURIComponent(id)}&limit=100&offset=${offset}&inc=artist-credits&fmt=json`);
     const page = response.recordings ?? [];
@@ -577,7 +578,7 @@ async function getMusicBrainzArtistProfile(input: { creatorId: string; name: str
     .sort((first, second) => (second.releaseDate ?? "").localeCompare(first.releaseDate ?? "") || first.title.localeCompare(second.title));
   return {
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
-    works: works.slice(0, CREATOR_SCAN_LIMIT),
+    works: works.slice(0, RECENT_WORKS_LIMIT),
     collaborators,
     artistCollaborations: [],
     network,
@@ -592,7 +593,7 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
   const id = input.creatorId.replace("mbid:", "");
   const works: MbWork[] = [];
   let totalWorks = 0;
-  while (works.length < MUSICBRAINZ_MAX_CREATOR_WORKS) {
+  while (works.length < PROFILE_SEARCH_MAX) {
     const offset = works.length;
     const response = await musicBrainzRequest<{ works?: MbWork[]; "work-count"?: number }>(`/work?artist=${encodeURIComponent(id)}&limit=100&offset=${offset}&inc=artist-rels+recording-rels&fmt=json`);
     const page = response.works ?? [];
@@ -635,7 +636,7 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
     .sort((first, second) => (second.releaseDate ?? "").localeCompare(first.releaseDate ?? "") || first.title.localeCompare(second.title));
   return {
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
-    works: datedWorks.slice(0, CREATOR_SCAN_LIMIT),
+    works: datedWorks.slice(0, RECENT_WORKS_LIMIT),
     collaborators: confidence === "verified" ? collaborators : [],
     artistCollaborations: confidence === "verified" ? buildArtistCollaborations(verifiedWorks.map(work => ({
       work: { id: work.id, title: work.title, releaseDate: releaseDates.get(work.id), relevance: 0 },
@@ -683,12 +684,22 @@ function unavailableCreatorProfile(input: { creatorId: string; name: string; rol
   };
 }
 
+function broaderCreatorProfile(first: CreatorProfile | undefined, second: CreatorProfile, fallbackReason: string) {
+  if (!first) return second;
+  const selected = second.scannedWorks > first.scannedWorks ? second : first;
+  const other = selected === second ? first : second;
+  return {
+    ...selected,
+    sourceNote: `${fallbackReason} ${selected.sourceNote} 300곡 이상 조회 목표로 보조 카탈로그도 교차 확인했으며, 다른 출처에서 검증된 고유 작품은 ${other.scannedWorks}개였습니다.${selected.scannedWorks < PROFILE_SEARCH_MIN ? ` 원본 제공처에서 확인 가능한 고유 작품이 목표치 ${PROFILE_SEARCH_MIN}개보다 적어 실제 확인된 ${selected.scannedWorks}개만 집계했습니다.` : ""}`,
+  } satisfies CreatorProfile;
+}
+
 export async function getCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[]; externalIpi?: string; externalMbid?: string }): Promise<CreatorProfile> {
   let creditsProfile: CreatorProfile | undefined;
   if (input.creatorId.startsWith("ipi:")) {
     try {
       creditsProfile = await getCreditsFmCreatorProfile(input);
-      if (creditsProfile.confidence === "verified") return creditsProfile;
+      if (creditsProfile.confidence === "verified" && creditsProfile.scannedWorks >= PROFILE_SEARCH_MIN) return creditsProfile;
     } catch (error) {
       console.warn("[Creator Signal] Credits.fm creator profile fallback", input.creatorId, error);
     }
@@ -697,9 +708,7 @@ export async function getCreatorProfile(input: { creatorId: string; name: string
   if (input.externalMbid && !input.creatorId.startsWith("mbid:")) {
     try {
       const resolved = await getResolvedMusicBrainzProfile(input, input.externalMbid);
-      return creditsProfile
-        ? { ...resolved, sourceNote: `Credits.fm 프로필의 검증 조건이 부족해 트랙 크레딧에 함께 연결된 MusicBrainz 인물 ID로 교차 조회했습니다. ${resolved.sourceNote}` }
-        : resolved;
+      return broaderCreatorProfile(creditsProfile, resolved, "트랙 크레딧에 함께 연결된 MusicBrainz 인물 ID로 교차 조회했습니다.");
     } catch (error) {
       console.warn("[Creator Signal] linked MusicBrainz profile fallback", input.externalMbid, error);
     }
@@ -717,15 +726,17 @@ export async function getCreatorProfile(input: { creatorId: string; name: string
     const identity = await resolveMusicBrainzIdentity(input.name);
     if (identity) {
       const resolved = await getResolvedMusicBrainzProfile(input, identity.id);
-      return creditsProfile
-        ? { ...resolved, sourceNote: `Credits.fm 프로필의 검증 조건이 부족해 동일 이름의 MusicBrainz 인물 ID로 교차 조회했습니다. ${resolved.sourceNote}` }
-        : resolved;
+      return broaderCreatorProfile(creditsProfile, resolved, "동일 이름의 MusicBrainz 인물 ID로 교차 조회했습니다.");
     }
   } catch (error) {
     console.warn("[Creator Signal] name identity resolution failed", input.name, error);
   }
 
-  return creditsProfile ?? unavailableCreatorProfile(input, "Credits.fm과 MusicBrainz에서 이 이름과 역할에 맞는 고유 인물 식별자를 확인하지 못했습니다. 다른 이름 표기나 공식 식별자가 필요합니다.");
+  if (creditsProfile) return {
+    ...creditsProfile,
+    sourceNote: `${creditsProfile.sourceNote}${creditsProfile.scannedWorks < PROFILE_SEARCH_MIN ? ` 300곡 이상 조회를 목표로 보조 출처까지 확인했지만 원본에서 검증 가능한 고유 작품은 ${creditsProfile.scannedWorks}개였습니다.` : ""}`,
+  };
+  return unavailableCreatorProfile(input, "Credits.fm과 MusicBrainz에서 이 이름과 역할에 맞는 고유 인물 식별자를 확인하지 못했습니다. 다른 이름 표기나 공식 식별자가 필요합니다.");
 }
 
 async function musicBrainzFallback(title: string, artist?: string, isrc?: string): Promise<MusicAnalysis> {
