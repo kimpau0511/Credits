@@ -44,6 +44,14 @@ describe("music credit normalization", () => {
     assert.equal(ranked[0]?.id, "block-b");
     assert.equal(ranked.at(-1)?.id, "unrelated");
   });
+
+  it("prioritizes a Korean ISRC for an exact K-pop title when no artist is supplied", () => {
+    const ranked = rankTrackCandidates([
+      { id: "global", title: "HER", artist: "Other Artist", source: "Credits.fm", isrc: "USAAA0000001" },
+      { id: "kpop", title: "H.E.R", artist: "Block B", source: "Credits.fm", isrc: "KRA491401408" },
+    ], "HER");
+    assert.equal(ranked[0]?.id, "kpop");
+  });
   it("maps known relationship labels into the credit taxonomy", () => {
     assert.equal(normalizeCreditRole("composer"), "작곡");
     assert.equal(normalizeCreditRole("lyricist"), "작사");

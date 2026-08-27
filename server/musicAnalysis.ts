@@ -84,6 +84,7 @@ type CreditsBatchResponse = { isrcs?: Record<string, CreditsIsrcResponse | { err
 type CacheRecord<T> = { createdAt: number; result: T };
 const analysisCache = new Map<string, CacheRecord<MusicAnalysis>>();
 const creatorCache = new Map<string, CacheRecord<CreatorProfile>>();
+const candidateCache = new Map<string, CacheRecord<TrackCandidate[]>>();
 const identityCache = new Map<string, MbArtist | null>();
 let lastMusicBrainzRequestAt = 0;
 const creditsRateWindows: Record<"search" | "lookup", number[]> = { search: [], lookup: [] };
@@ -230,31 +231,31 @@ function enforceCreditsRateLimit(kind: "search" | "lookup") {
   creditsRateWindows[kind] = entries;
 }
 
-async function musicBrainzRequest<T>(path: string): Promise<T> {
+async function musicBrainzRequest<T>(path: string, options: { timeoutMs?: number; attempts?: number } = {}): Promise<T> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  const attempts = options.attempts ?? 2;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const wait = Math.max(0, 1050 - (Date.now() - lastMusicBrainzRequestAt));
     if (wait) await sleep(wait);
     lastMusicBrainzRequestAt = Date.now();
     try {
-      const response = await fetch(`${MUSICBRAINZ_BASE_URL}${path}`, { headers: { Accept: "application/json", "User-Agent": MUSICBRAINZ_USER_AGENT }, signal: AbortSignal.timeout(10_000) });
+      const response = await fetch(`${MUSICBRAINZ_BASE_URL}${path}`, { headers: { Accept: "application/json", "User-Agent": MUSICBRAINZ_USER_AGENT }, signal: AbortSignal.timeout(options.timeoutMs ?? 10_000) });
       if (response.ok) return response.json() as Promise<T>;
       const error = new Error(`MUSICBRAINZ_${response.status}`);
-      if (response.status < 500 || attempt === 1) throw error;
+      if (response.status < 500 || attempt === attempts - 1) throw error;
       lastError = error;
     } catch (error) {
       lastError = error;
-      if (attempt === 1) throw error;
+      if (attempt === attempts - 1) throw error;
     }
   }
   throw lastError;
 }
 
-async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lookup", timeoutMs = 15_000): Promise<T> {
+async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lookup", timeoutMs = 15_000, attempts = 2): Promise<T> {
   enforceCreditsRateLimit(kind);
   const headers: Record<string, string> = { Accept: "application/json" };
   if (CREDITS_FM_API_KEY) headers["x-api-key"] = CREDITS_FM_API_KEY;
-  const attempts = 2;
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -324,7 +325,8 @@ export function rankTrackCandidates(candidates: TrackCandidate[], title: string,
     const candidateArtist = normalizedText(candidate.artist);
     const titleScore = candidateTitle === expectedTitle ? 1_000 : candidateTitle.startsWith(expectedTitle) ? 500 : candidateTitle.includes(expectedTitle) ? 250 : 0;
     const artistScore = expectedArtist && candidateArtist.includes(expectedArtist) ? 600 : 0;
-    return titleScore + artistScore + (candidate.releaseDate ? 5 : 0) + (candidate.source === "Credits.fm" ? 1 : 0);
+    const koreanReleaseScore = candidateTitle === expectedTitle && candidate.isrc?.toUpperCase().startsWith("KR") ? 300 : 0;
+    return titleScore + artistScore + koreanReleaseScore + (candidate.source === "Credits.fm" ? 20 : 0) + (candidate.releaseDate ? 5 : 0);
   };
   return candidates
     .map((candidate, index) => ({ candidate, index, score: score(candidate) }))
@@ -369,13 +371,16 @@ async function creditsFmTrack(title: string, artist?: string): Promise<CreditsIs
 export async function searchMusicCandidates(input: { title: string; artist?: string }): Promise<TrackCandidate[]> {
   const title = input.title.trim();
   const artist = input.artist?.trim();
-  const resolvedArtist = artist ? await resolveMusicBrainzIdentity(artist).catch(() => undefined) : undefined;
+  const cacheKey = `${normalizedText(title)}::${normalizedText(artist ?? "")}`;
+  const cached = candidateCache.get(cacheKey);
+  if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return cached.result;
+  const resolvedArtist = artist ? await resolveMusicBrainzIdentity(artist, { timeoutMs: 3_000, attempts: 1 }).catch(() => undefined) : undefined;
   const searchArtist = resolvedArtist?.name ?? artist;
-  const query = [title, searchArtist].filter(Boolean).join(" ");
-  const musicBrainzQuery = searchArtist ? `recording:"${title}" AND artist:"${searchArtist}"` : `recording:"${title}"`;
+  const query = [title, resolvedArtist?.name].filter(Boolean).join(" ");
+  const musicBrainzQuery = resolvedArtist?.name ? `recording:"${title}" AND artist:"${resolvedArtist.name}"` : `recording:"${title}"`;
   const [creditsSearch, fallback] = await Promise.all([
-    creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(query)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 30_000).catch(() => undefined),
-    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(musicBrainzQuery)}&limit=25&fmt=json`).catch(() => undefined),
+    creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(query)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", resolvedArtist ? 3_500 : 6_000, 1).catch(() => undefined),
+    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(musicBrainzQuery)}&limit=25&fmt=json`, { timeoutMs: 3_500, attempts: 1 }).catch(() => undefined),
   ]);
   const creditsCandidates = Array.from(new Map((creditsSearch?.recordings?.items ?? []).map(item => [item.isrc, {
     id: `isrc:${item.isrc}`,
@@ -392,7 +397,19 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
     releaseDate: recording["first-release-date"],
     source: "MusicBrainz" as const,
   }));
-  return rankTrackCandidates([...creditsCandidates, ...musicBrainzCandidates], title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
+  let result = rankTrackCandidates([...creditsCandidates, ...musicBrainzCandidates], title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
+  if (!result.length) {
+    const emergency = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:${title}`)}&limit=25&fmt=json`, { timeoutMs: 4_000, attempts: 1 }).catch(() => undefined);
+    result = rankTrackCandidates((emergency?.recordings ?? []).map(recording => ({
+      id: `mbid:${recording.id}`,
+      title: recording.title,
+      artist: primaryArtist(recording)?.name || artist || "Unknown artist",
+      releaseDate: recording["first-release-date"],
+      source: "MusicBrainz" as const,
+    })), title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
+  }
+  if (result.length) candidateCache.set(cacheKey, { createdAt: Date.now(), result });
+  return result;
 }
 
 function creditsFromArtistRelations(relations?: MbRelation[]): MusicCredit[] {
@@ -668,12 +685,12 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
   };
 }
 
-async function resolveMusicBrainzIdentity(name: string): Promise<MbArtist | undefined> {
+async function resolveMusicBrainzIdentity(name: string, requestOptions?: { timeoutMs?: number; attempts?: number }): Promise<MbArtist | undefined> {
   const key = normalizedText(name);
   if (identityCache.has(key)) return identityCache.get(key) ?? undefined;
   const variants = musicBrainzNameVariants(name).map(value => value.replace(/"/g, ""));
   const query = variants.flatMap(value => [`artist:"${value}"`, `alias:"${value}"`]).join(" OR ");
-  const response = await musicBrainzRequest<{ artists?: MbArtist[] }>(`/artist?query=${encodeURIComponent(query)}&limit=10&fmt=json`);
+  const response = await musicBrainzRequest<{ artists?: MbArtist[] }>(`/artist?query=${encodeURIComponent(query)}&limit=10&fmt=json`, requestOptions);
   const match = selectBestMusicBrainzArtistForNames(response.artists ?? [], variants);
   identityCache.set(key, match ?? null);
   return match;
@@ -755,8 +772,8 @@ export async function getCreatorProfile(input: { creatorId: string; name: string
   return unavailableCreatorProfile(input, "Credits.fm과 MusicBrainz에서 이 이름과 역할에 맞는 고유 인물 식별자를 확인하지 못했습니다. 다른 이름 표기나 공식 식별자가 필요합니다.");
 }
 
-async function musicBrainzFallback(title: string, artist?: string, isrc?: string): Promise<MusicAnalysis> {
-  let match: Pick<MbRecording, "id"> | undefined;
+async function musicBrainzFallback(title: string, artist?: string, isrc?: string, mbid?: string): Promise<MusicAnalysis> {
+  let match: Pick<MbRecording, "id"> | undefined = mbid ? { id: mbid } : undefined;
   if (isrc) {
     const lookup = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/isrc/${encodeURIComponent(isrc)}?inc=recordings+artist-credits&fmt=json`).catch(() => undefined);
     const expectedArtist = artist ? normalizedText(artist) : "";
@@ -780,13 +797,13 @@ async function musicBrainzFallback(title: string, artist?: string, isrc?: string
   return { track, credits, network: buildCooccurrenceNetwork([credits]), topTracks: [], briefing: buildBriefing(track, credits, detailed.length ? "enriched" : "limited"), sourceNote: "Credits.fm에서 일치하는 녹음을 찾지 못해 MusicBrainz 공개 관계 데이터를 보조 사용했습니다.", creditsStatus: detailed.length ? "enriched" : "limited", aiModel: "Rule-based credit editor", cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS } };
 }
 
-export async function analyzeMusic(input: { title: string; artist?: string; isrc?: string }): Promise<MusicAnalysis> {
+export async function analyzeMusic(input: { title: string; artist?: string; isrc?: string; mbid?: string }): Promise<MusicAnalysis> {
   const title = input.title.trim();
   const artist = input.artist?.trim();
-  const key = input.isrc ? `isrc:${input.isrc}` : `${title.toLowerCase()}::${artist?.toLowerCase() ?? ""}`;
+  const key = input.isrc ? `isrc:${input.isrc}` : input.mbid ? `mbid:${input.mbid}` : `${title.toLowerCase()}::${artist?.toLowerCase() ?? ""}`;
   const cached = analysisCache.get(key);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return { ...cached.result, cache: { state: "cached", storedAt: cached.createdAt, expiresAt: cached.createdAt + CACHE_TTL_MS } };
-  const creditsRecording = await (input.isrc ? creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(input.isrc)}`, "lookup", 5_000) : creditsFmTrack(title, artist)).catch(error => { console.warn("[Creator Signal] Credits.fm fallback", error); return undefined; });
+  const creditsRecording = await (input.mbid ? Promise.resolve(undefined) : input.isrc ? creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(input.isrc)}`, "lookup", 5_000, 1) : creditsFmTrack(title, artist)).catch(error => { console.warn("[Creator Signal] Credits.fm fallback", error); return undefined; });
   let result: MusicAnalysis;
   if (creditsRecording) {
     const credits = creditsFromCreditsFm(creditsRecording);
@@ -794,7 +811,7 @@ export async function analyzeMusic(input: { title: string; artist?: string; isrc
     const track = { id: creditsRecording.isrc, title: creditsRecording.song_title ?? creditsRecording.recording_title ?? title, artist: creditsRecording.artist_names?.join(", ") ?? artist ?? "Unknown artist", releaseDate: creditsRecording.release_date, album: creditsRecording.album_title ?? creditsRecording.release_title, genres: creditsRecording.genres ?? creditsRecording.songwriter_genres ?? [] };
     const storedAt = Date.now();
     result = { track, credits, network: buildCooccurrenceNetwork([credits]), topTracks: [], briefing: buildBriefing(track, credits, detailed.length ? "enriched" : "limited"), sourceNote: `Credits.fm ISRC ${creditsRecording.isrc} 응답을 우선 사용했습니다. 원본 소스: ${(creditsRecording.sources ?? []).join(", ") || "Credits.fm"}.`, creditsStatus: detailed.length ? "enriched" : "limited", aiModel: "Rule-based credit editor", cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS } };
-  } else result = await musicBrainzFallback(title, artist, input.isrc);
+  } else result = await musicBrainzFallback(title, artist, input.isrc, input.mbid);
   analysisCache.set(key, { createdAt: result.cache.storedAt, result });
   return result;
 }

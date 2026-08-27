@@ -9,6 +9,7 @@ export const appRouter = router({
         title: z.string().trim().min(1, "곡 제목을 입력해 주세요.").max(160),
         artist: z.string().trim().max(160).optional(),
         isrc: z.string().trim().min(6).max(32).optional(),
+        mbid: z.string().uuid().optional(),
       }))
       .mutation(async ({ input }) => analyzeMusic(input)),
     searchCandidates: publicProcedure
