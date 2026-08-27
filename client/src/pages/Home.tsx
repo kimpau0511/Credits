@@ -2,6 +2,8 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { ArrowUpRight, CircleAlert, LoaderCircle, Search, X } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { useAuth } from "@/contexts/AuthContext";
+import { saveAnalysis } from "@/lib/researchStore";
 import type { CreatorProfile, MusicAnalysis, NetworkNode, TrackCandidate } from "../../../server/musicAnalysis";
 
 const examples = [{ title: "뱅뱅뱅", artist: "BIGBANG" }, { title: "APT.", artist: "ROSÉ" }, { title: "Die With A Smile", artist: "Lady Gaga" }];
@@ -94,8 +96,8 @@ function CandidateSelection({ candidates, onSelect, onBack }: { candidates: Trac
 }
 
 export default function Home() {
-  const { text } = useLanguage(); const [title, setTitle] = useState(""); const [artist, setArtist] = useState(""); const [analysis, setAnalysis] = useState<MusicAnalysis>(); const [error, setError] = useState(""); const [candidates, setCandidates] = useState<TrackCandidate[]>();
-  const search = trpc.music.analyze.useMutation({ onMutate: () => setAnalysis(undefined), onSuccess: result => { setAnalysis(result); setError(""); setTimeout(() => document.getElementById("results")?.scrollIntoView({ behavior: "smooth" }), 20); }, onError: () => setError(text("분석 데이터를 불러오지 못했습니다. 표기를 바꿔 다시 시도해 주세요.", "Unable to load analysis. Try a different title or artist spelling.")) });
+  const { text } = useLanguage(); const { session } = useAuth(); const [title, setTitle] = useState(""); const [artist, setArtist] = useState(""); const [analysis, setAnalysis] = useState<MusicAnalysis>(); const [error, setError] = useState(""); const [saveState, setSaveState] = useState<"" | "saving" | "saved" | "failed">(""); const [candidates, setCandidates] = useState<TrackCandidate[]>();
+  const search = trpc.music.analyze.useMutation({ onMutate: () => { setAnalysis(undefined); setSaveState(""); }, onSuccess: result => { setAnalysis(result); setError(""); setTimeout(() => document.getElementById("results")?.scrollIntoView({ behavior: "smooth" }), 20); if (session) { setSaveState("saving"); void saveAnalysis(result, session.user.id, session.access_token).then(() => setSaveState("saved")).catch(() => setSaveState("failed")); } }, onError: () => setError(text("분석 데이터를 불러오지 못했습니다. 표기를 바꿔 다시 시도해 주세요.", "Unable to load analysis. Try a different title or artist spelling.")) });
   function analyzeCandidate(candidate: TrackCandidate) { setCandidates(undefined); setAnalysis(undefined); search.mutate({ title: candidate.title, artist: candidate.artist, isrc: candidate.isrc }); }
   const candidateSearch = trpc.music.searchCandidates.useMutation({ onSuccess: items => { if (!items.length) { setError(text("일치하는 곡을 찾지 못했습니다.", "No matching recording was found.")); return; } if (items.length === 1) analyzeCandidate(items[0]); else setCandidates(items); }, onError: () => setError(text("곡 후보를 불러오지 못했습니다.", "Unable to load matching tracks.")) });
   const isPending = search.isPending || candidateSearch.isPending;

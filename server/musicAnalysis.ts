@@ -55,7 +55,7 @@ export type CreatorProfile = {
   sourceNote: string;
 };
 export type MusicAnalysis = {
-  track: { id: string; title: string; artist: string; releaseDate?: string; durationMs?: number };
+  track: { id: string; title: string; artist: string; releaseDate?: string; durationMs?: number; album?: string; genres?: string[] };
   credits: MusicCredit[];
   network: { nodes: NetworkNode[]; edges: NetworkEdge[] };
   topTracks: TopTrack[];
@@ -69,12 +69,12 @@ export type MusicAnalysis = {
 type MbArtist = { id: string; name: string; score?: number; aliases?: Array<{ name?: string }> };
 type MbRelation = { type?: string; "target-type"?: string; artist?: MbArtist; work?: { id: string }; recording?: { id: string; title?: string } };
 type MbWork = { id: string; title: string; "first-release-date"?: string; relations?: MbRelation[] };
-type MbRecording = { id: string; title: string; length?: number; "first-release-date"?: string; "artist-credit"?: Array<{ artist?: MbArtist; name?: string }>; relations?: MbRelation[] };
+type MbRecording = { id: string; title: string; length?: number; "first-release-date"?: string; "artist-credit"?: Array<{ artist?: MbArtist; name?: string }>; relations?: MbRelation[]; releases?: Array<{ title?: string; date?: string }>; genres?: Array<{ name?: string }> };
 type CreditsSearchRecording = { isrc: string; title: string; artist_names?: string[]; release_date?: string };
 type CreditsSearchResponse = { recordings?: { items?: CreditsSearchRecording[] } };
 type CreditsSongwriter = { name: string; ipi?: string; role?: string };
 type CreditsPerformer = { name: string; mbid?: string; role?: string; credit_type?: string };
-type CreditsIsrcResponse = { isrc: string; recording_title?: string; song_title?: string; artist_names?: string[]; release_date?: string; songwriters?: CreditsSongwriter[]; performers?: CreditsPerformer[]; sources?: string[]; updated_at?: string };
+type CreditsIsrcResponse = { isrc: string; recording_title?: string; song_title?: string; artist_names?: string[]; release_date?: string; album_title?: string; release_title?: string; genres?: string[]; songwriter_genres?: string[]; songwriters?: CreditsSongwriter[]; performers?: CreditsPerformer[]; sources?: string[]; updated_at?: string };
 type CreditsIpiResponse = { ipi: string; full_name: string; roles?: string[]; isrcs?: string[] };
 type CreditsBatchResponse = { isrcs?: Record<string, CreditsIsrcResponse | { error?: string }> };
 
@@ -742,12 +742,13 @@ async function musicBrainzFallback(title: string, artist?: string, isrc?: string
     match = search.recordings?.[0];
   }
   if (!match) throw new Error("TRACK_NOT_FOUND");
-  const recording = await musicBrainzRequest<MbRecording>(`/recording/${encodeURIComponent(match.id)}?inc=artist-credits+recording-rels+work-rels+releases&fmt=json`);
+  const recording = await musicBrainzRequest<MbRecording>(`/recording/${encodeURIComponent(match.id)}?inc=artist-credits+recording-rels+work-rels+releases+genres&fmt=json`);
   const workId = recording.relations?.find(relation => relation["target-type"] === "work")?.work?.id;
   const workCredits = workId ? creditsFromArtistRelations((await musicBrainzRequest<MbWork>(`/work/${encodeURIComponent(workId)}?inc=artist-rels&fmt=json`)).relations) : [];
   const credits = consolidateMusicCredits([...workCredits, ...performanceCredits(recording)]);
   const detailed = credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role));
-  const track = { id: recording.id, title: recording.title, artist: primaryArtist(recording)?.name ?? artist ?? "Unknown artist", releaseDate: recording["first-release-date"], durationMs: recording.length };
+  const release = recording.releases?.find(item => item.date === recording["first-release-date"]) ?? recording.releases?.[0];
+  const track = { id: recording.id, title: recording.title, artist: primaryArtist(recording)?.name ?? artist ?? "Unknown artist", releaseDate: recording["first-release-date"], durationMs: recording.length, album: release?.title, genres: (recording.genres ?? []).flatMap(genre => genre.name ? [genre.name] : []) };
   const storedAt = Date.now();
   return { track, credits, network: buildCooccurrenceNetwork([credits]), topTracks: await findArtistCatalog(primaryArtist(recording)?.id), briefing: buildBriefing(track, credits, detailed.length ? "enriched" : "limited"), sourceNote: "Credits.fm에서 일치하는 녹음을 찾지 못해 MusicBrainz 공개 관계 데이터를 보조 사용했습니다.", creditsStatus: detailed.length ? "enriched" : "limited", aiModel: "Rule-based credit editor", cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS } };
 }
@@ -763,7 +764,7 @@ export async function analyzeMusic(input: { title: string; artist?: string; isrc
   if (creditsRecording) {
     const credits = creditsFromCreditsFm(creditsRecording);
     const detailed = credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role));
-    const track = { id: creditsRecording.isrc, title: creditsRecording.song_title ?? creditsRecording.recording_title ?? title, artist: creditsRecording.artist_names?.join(", ") ?? artist ?? "Unknown artist", releaseDate: creditsRecording.release_date };
+    const track = { id: creditsRecording.isrc, title: creditsRecording.song_title ?? creditsRecording.recording_title ?? title, artist: creditsRecording.artist_names?.join(", ") ?? artist ?? "Unknown artist", releaseDate: creditsRecording.release_date, album: creditsRecording.album_title ?? creditsRecording.release_title, genres: creditsRecording.genres ?? creditsRecording.songwriter_genres ?? [] };
     const storedAt = Date.now();
     result = { track, credits, network: buildCooccurrenceNetwork([credits]), topTracks: [], briefing: buildBriefing(track, credits, detailed.length ? "enriched" : "limited"), sourceNote: `Credits.fm ISRC ${creditsRecording.isrc} 응답을 우선 사용했습니다. 원본 소스: ${(creditsRecording.sources ?? []).join(", ") || "Credits.fm"}.`, creditsStatus: detailed.length ? "enriched" : "limited", aiModel: "Rule-based credit editor", cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS } };
   } else result = await musicBrainzFallback(title, artist, input.isrc);
