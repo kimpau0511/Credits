@@ -1,4 +1,4 @@
-import type { CreditRole, MusicAnalysis } from "../../../server/musicAnalysis";
+import type { CreditRole, CreatorProfile, MusicAnalysis } from "../../../server/musicAnalysis";
 import { supabaseRest } from "./supabase";
 
 export type SavedCredit = {
@@ -21,6 +21,14 @@ export type SavedTrack = {
   created_at: string;
   credits: SavedCredit[];
 };
+
+export type SavedCreatorProfile = {
+  profile: CreatorProfile;
+  updatedAt: string;
+  expiresAt: string;
+};
+
+export const CREATOR_PROFILE_CACHE_MS = 1000 * 60 * 60 * 24 * 30;
 
 export async function saveAnalysis(analysis: MusicAnalysis, userId: string, accessToken: string) {
   const trackKey = analysis.track.id.includes("-") ? `mbid:${analysis.track.id}` : `isrc:${analysis.track.id}`;
@@ -68,4 +76,34 @@ export function loadSavedTracks(accessToken: string) {
     "research_tracks?select=id,track_key,title,artist,release_date,album,genres,created_at,credits:research_credits(id,creator_key,name,role,external_ipi,external_mbid)&order=created_at.desc",
     accessToken,
   );
+}
+
+export async function loadCreatorProfile(creatorKey: string, accessToken: string): Promise<SavedCreatorProfile | undefined> {
+  const rows = await supabaseRest<Array<{ profile: CreatorProfile; updated_at: string; expires_at: string }>>(
+    `creator_profiles?select=profile,updated_at,expires_at&creator_key=eq.${encodeURIComponent(creatorKey)}&status=eq.complete&limit=1`,
+    accessToken,
+  );
+  const row = rows[0];
+  return row ? { profile: row.profile, updatedAt: row.updated_at, expiresAt: row.expires_at } : undefined;
+}
+
+export async function saveCreatorProfile(profile: CreatorProfile, creatorKey: string, userId: string, accessToken: string) {
+  const now = new Date();
+  await supabaseRest<void>("creator_profiles?on_conflict=user_id,creator_key", accessToken, {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify({
+      user_id: userId,
+      creator_key: creatorKey,
+      name: profile.creator.name,
+      roles: profile.creator.roles,
+      scanned_works: profile.scannedWorks,
+      confidence: profile.confidence,
+      status: "complete",
+      profile,
+      completed_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + CREATOR_PROFILE_CACHE_MS).toISOString(),
+      updated_at: now.toISOString(),
+    }),
+  });
 }

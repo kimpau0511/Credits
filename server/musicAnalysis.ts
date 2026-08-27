@@ -490,12 +490,6 @@ export function buildBriefing(track: MusicAnalysis["track"], credits: MusicCredi
   return `핵심 요약\n${summary}\n\n크레딧 구조\n${structure}\n\n리서치 포인트\n${researchPoint}\n\n해석 범위\n${caveat}`;
 }
 
-async function findArtistCatalog(artistId?: string): Promise<TopTrack[]> {
-  if (!artistId) return [];
-  const result = await musicBrainzRequest<{ recordings?: Array<Pick<MbRecording, "id" | "title" | "first-release-date"> & { score?: number }> }>(`/recording?artist=${encodeURIComponent(artistId)}&limit=12&fmt=json`);
-  return (result.recordings ?? []).map(recording => ({ id: recording.id, title: recording.title, releaseDate: recording["first-release-date"], relevance: Number(recording.score ?? 0) })).sort((a, b) => b.relevance - a.relevance || (b.releaseDate ?? "").localeCompare(a.releaseDate ?? "")).slice(0, RECENT_WORKS_LIMIT);
-}
-
 async function getCreditsFmCreatorProfile(input: { creatorId: string; name: string; roles: CreditRole[] }): Promise<CreatorProfile> {
   const cached = creatorCache.get(input.creatorId);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return cached.result;
@@ -783,7 +777,7 @@ async function musicBrainzFallback(title: string, artist?: string, isrc?: string
   const release = recording.releases?.find(item => item.date === recording["first-release-date"]) ?? recording.releases?.[0];
   const track = { id: recording.id, title: recording.title, artist: primaryArtist(recording)?.name ?? artist ?? "Unknown artist", releaseDate: recording["first-release-date"], durationMs: recording.length, album: release?.title, genres: (recording.genres ?? []).flatMap(genre => genre.name ? [genre.name] : []) };
   const storedAt = Date.now();
-  return { track, credits, network: buildCooccurrenceNetwork([credits]), topTracks: await findArtistCatalog(primaryArtist(recording)?.id), briefing: buildBriefing(track, credits, detailed.length ? "enriched" : "limited"), sourceNote: "Credits.fm에서 일치하는 녹음을 찾지 못해 MusicBrainz 공개 관계 데이터를 보조 사용했습니다.", creditsStatus: detailed.length ? "enriched" : "limited", aiModel: "Rule-based credit editor", cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS } };
+  return { track, credits, network: buildCooccurrenceNetwork([credits]), topTracks: [], briefing: buildBriefing(track, credits, detailed.length ? "enriched" : "limited"), sourceNote: "Credits.fm에서 일치하는 녹음을 찾지 못해 MusicBrainz 공개 관계 데이터를 보조 사용했습니다.", creditsStatus: detailed.length ? "enriched" : "limited", aiModel: "Rule-based credit editor", cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS } };
 }
 
 export async function analyzeMusic(input: { title: string; artist?: string; isrc?: string }): Promise<MusicAnalysis> {
