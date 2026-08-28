@@ -39,7 +39,7 @@ create table if not exists public.creator_profiles (
   scanned_works integer not null default 0,
   confidence text not null default 'limited' check (confidence in ('verified', 'limited')),
   status text not null default 'complete' check (status in ('complete')),
-  cache_version integer not null default 2,
+  cache_version integer not null default 3,
   profile jsonb not null,
   completed_at timestamptz not null default now(),
   expires_at timestamptz not null,

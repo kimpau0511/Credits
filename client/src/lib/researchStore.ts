@@ -29,7 +29,7 @@ export type SavedCreatorProfile = {
 };
 
 export const CREATOR_PROFILE_CACHE_MS = 1000 * 60 * 60 * 24 * 30;
-export const CREATOR_PROFILE_CACHE_VERSION = 2;
+export const CREATOR_PROFILE_CACHE_VERSION = 3;
 
 export async function saveAnalysis(analysis: MusicAnalysis, userId: string, accessToken: string) {
   const trackKey = analysis.track.id.includes("-") ? `mbid:${analysis.track.id}` : `isrc:${analysis.track.id}`;
