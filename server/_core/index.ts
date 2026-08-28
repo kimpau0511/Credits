@@ -9,12 +9,20 @@ async function startServer() {
   const app = express();
   const server = createServer(app);
   app.disable("x-powered-by");
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    next();
+  });
   app.use(express.json({ limit: "32kb" }));
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
   app.use(
     "/api/trpc",
     createExpressMiddleware({
       router: appRouter,
+      createContext: ({ req }) => ({ authorization: req.headers.authorization }),
     })
   );
   if (process.env.NODE_ENV === "development") {

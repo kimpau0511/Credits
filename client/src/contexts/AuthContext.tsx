@@ -1,7 +1,6 @@
 import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
-import { AuthSession, refreshSession, signIn, signOut, signUp, supabaseConfigured } from "@/lib/supabase";
+import { AUTH_STORAGE_KEY, AuthSession, refreshSession, signIn, signOut, signUp, supabaseConfigured } from "@/lib/supabase";
 
-const STORAGE_KEY = "creator-signal-session";
 type AuthContextValue = {
   configured: boolean;
   loading: boolean;
@@ -19,13 +18,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!supabaseConfigured) { setLoading(false); return; }
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
     if (!raw) { setLoading(false); return; }
     const stored = JSON.parse(raw) as AuthSession;
     refreshSession(stored.refresh_token).then(next => {
       setSession(next);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    }).catch(() => localStorage.removeItem(STORAGE_KEY)).finally(() => setLoading(false));
+      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(next));
+    }).catch(() => localStorage.removeItem(AUTH_STORAGE_KEY)).finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
@@ -33,10 +32,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const timer = window.setTimeout(() => {
       refreshSession(session.refresh_token).then(next => {
         setSession(next);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(next));
       }).catch(() => {
         setSession(undefined);
-        localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(AUTH_STORAGE_KEY);
       });
     }, Math.max((session.expires_in - 60) * 1000, 30_000));
     return () => window.clearTimeout(timer);
@@ -49,20 +48,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     login: async (email, password) => {
       const next = await signIn(email, password);
       setSession(next);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(next));
     },
     register: async (email, password) => {
       const result = await signUp(email, password);
       const next = "access_token" in result ? result : undefined;
       if (!next) return "confirmation-required";
       setSession(next);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(next));
       return "signed-in";
     },
     logout: async () => {
       if (session) await signOut(session.access_token).catch(() => undefined);
       setSession(undefined);
-      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(AUTH_STORAGE_KEY);
     },
   }), [loading, session]);
 

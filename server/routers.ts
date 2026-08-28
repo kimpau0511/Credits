@@ -1,10 +1,10 @@
 import { z } from "zod";
-import { publicProcedure, router } from "./_core/trpc";
+import { protectedProcedure, router } from "./_core/trpc";
 import { analyzeMusic, getCreatorProfile, searchMusicCandidates } from "./musicAnalysis";
 
 export const appRouter = router({
   music: router({
-    analyze: publicProcedure
+    analyze: protectedProcedure
       .input(z.object({
         title: z.string().trim().min(1, "곡 제목을 입력해 주세요.").max(160),
         artist: z.string().trim().max(160).optional(),
@@ -12,13 +12,13 @@ export const appRouter = router({
         mbid: z.string().uuid().optional(),
       }))
       .mutation(async ({ input }) => analyzeMusic(input)),
-    searchCandidates: publicProcedure
+    searchCandidates: protectedProcedure
       .input(z.object({
         title: z.string().trim().min(1, "곡 제목을 입력해 주세요.").max(160),
         artist: z.string().trim().max(160).optional(),
       }))
       .mutation(({ input }) => searchMusicCandidates(input)),
-    creatorProfile: publicProcedure
+    creatorProfile: protectedProcedure
       .input(z.object({
         creatorId: z.string().trim().min(3).max(180),
         name: z.string().trim().min(1).max(200),

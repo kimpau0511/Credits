@@ -9,6 +9,10 @@ type SaveState = "idle" | "saving" | "saved" | "failed";
 
 const memoryProfiles = new Map<string, SavedCreatorProfile>();
 
+export function clearCreatorProfileMemory() {
+  memoryProfiles.clear();
+}
+
 export function useCreatorProfile(selected?: NetworkNode) {
   const { session } = useAuth();
   const [cached, setCached] = useState<SavedCreatorProfile>();

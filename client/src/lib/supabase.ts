@@ -1,5 +1,6 @@
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.replace(/\/$/, "");
 const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+export const AUTH_STORAGE_KEY = "creator-signal-session";
 
 export type AuthUser = { id: string; email?: string };
 export type AuthSession = { access_token: string; refresh_token: string; expires_in: number; user: AuthUser };

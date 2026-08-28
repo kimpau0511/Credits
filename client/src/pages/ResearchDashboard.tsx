@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, LoaderCircle, Network, RefreshCw } from "lucide-react";
+import { ArrowLeft, LoaderCircle, Network, RefreshCw, Trash2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { loadSavedTracks, SavedCredit, SavedTrack } from "@/lib/researchStore";
+import { clearCreatorProfileMemory } from "@/hooks/useCreatorProfile";
+import { loadSavedTracks, resetResearchData, SavedCredit, SavedTrack } from "@/lib/researchStore";
 
 const creatorRoles = ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"];
 function displayDate(value?: string) { return value ? value.replace(/-/g, ".") : "—"; }
@@ -22,6 +23,7 @@ export default function ResearchDashboard({ onBack }: { onBack: () => void }) {
   const { session } = useAuth();
   const [tracks, setTracks] = useState<SavedTrack[]>([]);
   const [loading, setLoading] = useState(true);
+  const [resetting, setResetting] = useState(false);
   const [error, setError] = useState("");
   const [selectedKey, setSelectedKey] = useState<string>();
 
@@ -31,6 +33,20 @@ export default function ResearchDashboard({ onBack }: { onBack: () => void }) {
     try { setTracks(await loadSavedTracks(session.access_token)); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "수집 데이터를 불러오지 못했습니다."); }
     finally { setLoading(false); }
+  }
+  async function resetAll() {
+    if (!session || !window.confirm("내가 수집한 곡, 크레딧, 인물 프로필을 모두 삭제합니다. 이 작업은 되돌릴 수 없습니다. 계속할까요?")) return;
+    setResetting(true); setError("");
+    try {
+      await resetResearchData(session.user.id, session.access_token);
+      clearCreatorProfileMemory();
+      setTracks([]);
+      setSelectedKey(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "수집 데이터를 초기화하지 못했습니다.");
+    } finally {
+      setResetting(false);
+    }
   }
   useEffect(() => { void load(); }, [session?.access_token]);
 
@@ -81,7 +97,7 @@ export default function ResearchDashboard({ onBack }: { onBack: () => void }) {
   }, new Map<string, number>()).entries()).sort((a, b) => b[1] - a[1]) : [];
 
   return <main className="min-h-screen bg-[#101010] px-5 py-8 text-white sm:px-8">
-    <div className="mx-auto max-w-7xl"><header className="flex flex-wrap items-center justify-between gap-4 border-b border-white/20 pb-6"><div><button onClick={onBack} className="mb-5 flex items-center gap-2 text-xs text-white/55 hover:text-white"><ArrowLeft className="size-3.5" />곡 검색으로 돌아가기</button><p className="text-[10px] font-mono tracking-[.16em] text-white/45">MY RESEARCH COLLECTION</p><h1 className="mt-2 text-4xl font-black tracking-[-.05em]">수집 크레딧 분석</h1></div><button onClick={() => void load()} className="flex items-center gap-2 border border-white/25 px-4 py-2 text-xs"><RefreshCw className="size-3.5" />새로고침</button></header>
+    <div className="mx-auto max-w-7xl"><header className="flex flex-wrap items-center justify-between gap-4 border-b border-white/20 pb-6"><div><button onClick={onBack} className="mb-5 flex items-center gap-2 text-xs text-white/55 hover:text-white"><ArrowLeft className="size-3.5" />곡 검색으로 돌아가기</button><p className="text-[10px] font-mono tracking-[.16em] text-white/45">MY RESEARCH COLLECTION</p><h1 className="mt-2 text-4xl font-black tracking-[-.05em]">수집 크레딧 분석</h1></div><div className="flex items-center gap-2"><button onClick={() => void load()} disabled={loading || resetting} className="flex items-center gap-2 border border-white/25 px-4 py-2 text-xs disabled:opacity-40"><RefreshCw className="size-3.5" />새로고침</button><button onClick={() => void resetAll()} disabled={loading || resetting || !tracks.length} className="flex items-center gap-2 border border-red-300/50 px-4 py-2 text-xs text-red-200 disabled:opacity-30">{resetting ? <LoaderCircle className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}{resetting ? "초기화 중" : "초기화"}</button></div></header>
       {loading ? <div className="py-32 text-center"><LoaderCircle className="mx-auto size-7 animate-spin" /><p className="mt-4 text-sm text-white/55">수집 데이터를 분석하고 있습니다.</p></div> : error ? <p className="mt-8 border border-white/25 p-5 text-sm">{error}</p> : !tracks.length ? <div className="mt-10 border border-white/20 bg-[#181818] p-10"><h2 className="text-2xl font-black">아직 수집한 곡이 없습니다.</h2><p className="mt-3 text-sm text-white/55">곡을 검색하고 분석하면 자동으로 이 공간에 저장됩니다.</p></div> : <>
         <section className="mt-8 grid gap-px bg-white/15 sm:grid-cols-2 lg:grid-cols-4">{[["수집 곡", tracks.length], ["반복 등장 인물", analytics.creatorStats.filter(item => item.tracks.length > 1).length], ["확인 아티스트", analytics.artists.length], ["공동작업 연결", analytics.edges.length]].map(([label, value]) => <div key={String(label)} className="bg-[#181818] p-6"><p className="text-[10px] font-mono text-white/45">{label}</p><strong className="mt-3 block text-4xl">{value}</strong></div>)}</section>
         <section className="mt-8 grid gap-8 xl:grid-cols-[1.15fr_.85fr]"><div className="border border-white/20 bg-[#181818] p-6"><p className="text-[10px] font-mono text-white/45">REPEATED CREATORS</p><h2 className="mt-2 text-2xl font-black">반복 참여 작곡·작사가</h2><div className="mt-6 overflow-x-auto"><table className="w-full min-w-[650px] text-left text-xs"><thead className="border-b border-white/20 text-white/45"><tr><th className="py-3">인물</th><th>전체</th><th>작곡</th><th>작사</th><th>동시</th><th>최근 3개월</th></tr></thead><tbody>{analytics.creatorStats.map(creator => <tr key={creator.key} onClick={() => setSelectedKey(creator.key)} className="cursor-pointer border-b border-white/10 hover:bg-white hover:text-black"><td className="py-4 font-bold">{creator.name}</td><td>{creator.tracks.length}</td><td>{creator.compositionCount}</td><td>{creator.lyricCount}</td><td>{creator.combinedCount}</td><td>{creator.recentCount}</td></tr>)}</tbody></table></div></div>

@@ -79,6 +79,18 @@ export function loadSavedTracks(accessToken: string) {
   );
 }
 
+export async function resetResearchData(userId: string, accessToken: string) {
+  const userFilter = encodeURIComponent(userId);
+  await supabaseRest<void>(`creator_profiles?user_id=eq.${userFilter}`, accessToken, {
+    method: "DELETE",
+    headers: { Prefer: "return=minimal" },
+  });
+  await supabaseRest<void>(`research_tracks?user_id=eq.${userFilter}`, accessToken, {
+    method: "DELETE",
+    headers: { Prefer: "return=minimal" },
+  });
+}
+
 export async function loadCreatorProfile(creatorKey: string, accessToken: string): Promise<SavedCreatorProfile | undefined> {
   const rows = await supabaseRest<Array<{ profile: CreatorProfile; updated_at: string; expires_at: string }>>(
     `creator_profiles?select=profile,updated_at,expires_at&creator_key=eq.${encodeURIComponent(creatorKey)}&status=eq.complete&cache_version=eq.${CREATOR_PROFILE_CACHE_VERSION}&limit=1`,
