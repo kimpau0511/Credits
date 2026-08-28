@@ -663,6 +663,7 @@ async function getMusicBrainzArtistProfile(input: { creatorId: string; name: str
     .filter(item => isUsableCreatorName(item.name) && item.roles.some(role => creativeRoles.includes(role)))
     .sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 10);
   const confidence = verifiedCollaborationRows.length >= 3 && collaborators.length ? "verified" : "limited";
+  const observedCollaboratorNames = collaborators.slice(0, 3).map(item => item.name).join(", ");
   const works = uniqueRecordings.map(recording => ({ id: recording.id, title: recording.title, releaseDate: recording["first-release-date"], relevance: 0 }))
     .sort((first, second) => (second.releaseDate ?? "").localeCompare(first.releaseDate ?? "") || first.title.localeCompare(second.title));
   return {
@@ -679,7 +680,7 @@ async function getMusicBrainzArtistProfile(input: { creatorId: string; name: str
     worksOrder: "recent",
     sourceNote: confidence === "verified"
       ? `MusicBrainz에서 최대 500개 한도로 ${recordings.length}${recordings.length < totalRecordings ? `/${totalRecordings}` : ""}개 녹음을 조회하고, ${input.name}의 아티스트 ID가 실제 포함된 ${exactRecordings.length}개만 남겼습니다. 연결된 원작 ${workReferences.size}개 중 최근 ${sampledWorkReferences.length}개 관계를 확인했으며, 창작자 크레딧이 확인된 고유 작품 ${verifiedCollaborationRows.length}개에서 작곡가·작사가·프로듀서 협업 횟수를 계산했습니다. 이 수치는 확인된 작품 표본이며, 공동 명의 아티스트와 창작자 협업은 서로 분리해 한 작품당 한 번만 집계합니다.`
-      : `MusicBrainz에서 ${recordings.length}${recordings.length < totalRecordings ? `/${totalRecordings}` : ""}개 녹음을 확인했지만 작사·작곡 원작 관계가 연결된 작품은 ${verifiedCollaborationRows.length}개뿐입니다. 이 숫자는 전체 협업 횟수가 아니므로 창작자별 횟수·비중·그래프를 표시하지 않습니다.`,
+      : `MusicBrainz에서 ${recordings.length}${recordings.length < totalRecordings ? `/${totalRecordings}` : ""}개 녹음을 확인했지만 작사·작곡 원작 관계가 연결된 작품은 ${verifiedCollaborationRows.length}개뿐입니다.${observedCollaboratorNames ? ` 제한된 원본에서 ${observedCollaboratorNames} 등이 확인됐지만,` : ""} 실제 전체 협업 횟수는 판단할 수 없어 창작자별 횟수·비중·그래프를 표시하지 않습니다.`,
   };
 }
 
