@@ -321,9 +321,9 @@ export function normalizeCreditRole(relationType?: string): CreditRole {
 
 export function normalizeCreditsFmRole(role?: string, creditType?: string): CreditRole {
   const normalized = `${role ?? ""} ${creditType ?? ""}`.toLowerCase().replace(/[^a-z]/g, "");
-  if (normalized.includes("composerlyricist") || normalized.includes("songwriter")) return "작사·작곡";
+  if (normalized.includes("composerlyricist") || normalized.includes("songwriter") || normalized === "writer") return "작사·작곡";
   if (normalized.includes("composer")) return "작곡";
-  if (normalized.includes("lyricist")) return "작사";
+  if (normalized.includes("lyricist") || normalized.includes("lyrics") || normalized.includes("author")) return "작사";
   if (normalized.includes("arranger")) return "편곡";
   if (normalized.includes("producer")) return "프로듀싱";
   if (normalized.includes("performer") || normalized.includes("vocal") || normalized.includes("instrument")) return "연주";
@@ -402,8 +402,8 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return cached.result;
   const resolvedArtist = artist ? await resolveMusicBrainzIdentity(artist, { timeoutMs: 3_000, attempts: 1 }).catch(() => undefined) : undefined;
   const searchArtist = resolvedArtist?.name ?? artist;
-  const query = [title, resolvedArtist?.name].filter(Boolean).join(" ");
-  const musicBrainzQuery = resolvedArtist?.name ? `recording:"${title}" AND artist:"${resolvedArtist.name}"` : `recording:"${title}"`;
+  const query = [title, searchArtist].filter(Boolean).join(" ");
+  const musicBrainzQuery = searchArtist ? `recording:"${title}" AND artist:"${searchArtist}"` : `recording:"${title}"`;
   const [creditsSearch, fallback] = await Promise.all([
     creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(query)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", resolvedArtist ? 3_500 : 6_000, 1).catch(() => undefined),
     musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(musicBrainzQuery)}&limit=25&fmt=json`, { timeoutMs: 3_500, attempts: 1 }).catch(() => undefined),
@@ -869,6 +869,29 @@ export async function analyzeMusic(input: { title: string; artist?: string; isrc
     const track = { id: creditsRecording.isrc, title: creditsRecording.song_title ?? creditsRecording.recording_title ?? title, artist: creditsRecording.artist_names?.join(", ") ?? artist ?? "Unknown artist", releaseDate: creditsRecording.release_date, album: creditsRecording.album_title ?? creditsRecording.release_title, genres: creditsRecording.genres ?? creditsRecording.songwriter_genres ?? [] };
     const storedAt = Date.now();
     result = { track, credits, network: buildCooccurrenceNetwork([credits]), topTracks: [], briefing: buildBriefing(track, credits, detailed.length ? "enriched" : "limited"), sourceNote: `Credits.fm ISRC ${creditsRecording.isrc} 응답을 우선 사용했습니다. 원본 소스: ${(creditsRecording.sources ?? []).join(", ") || "Credits.fm"}.`, creditsStatus: detailed.length ? "enriched" : "limited", aiModel: "Rule-based credit editor", cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS } };
+    const fallback = await musicBrainzFallback(track.title, track.artist, creditsRecording.isrc).catch(() => undefined);
+    const fallbackDetailed = fallback?.credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role)) ?? [];
+    if (fallback && fallbackDetailed.length) {
+        const nonCreativeCredits = credits.filter(credit => !["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role));
+        const mergedCredits = consolidateMusicCredits([...nonCreativeCredits, ...fallback.credits]);
+        const mergedTrack = {
+          ...fallback.track,
+          title: track.title || fallback.track.title,
+          artist: track.artist || fallback.track.artist,
+          releaseDate: track.releaseDate ?? fallback.track.releaseDate,
+          album: track.album ?? fallback.track.album,
+          genres: track.genres?.length ? track.genres : fallback.track.genres,
+        };
+        result = {
+          ...fallback,
+          track: mergedTrack,
+          credits: mergedCredits,
+          network: buildCooccurrenceNetwork([mergedCredits]),
+          briefing: buildBriefing(mergedTrack, mergedCredits, "enriched"),
+          creditsStatus: "enriched",
+          sourceNote: `Credits.fm ISRC ${creditsRecording.isrc}의 곡 정보를 사용하고, 역할이 확정된 작사·작곡 크레딧은 MusicBrainz 원작 관계로 교차 검증했습니다.`,
+        };
+    }
   } else result = await musicBrainzFallback(title, artist, input.isrc, input.mbid);
   analysisCache.set(key, { createdAt: result.cache.storedAt, result });
   return result;

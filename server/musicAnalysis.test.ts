@@ -67,6 +67,9 @@ describe("music credit normalization", () => {
     ], "뱅뱅뱅", "BIGBANG");
     assert.equal(result?.isrc, "target");
     assert.equal(normalizeCreditsFmRole("ComposerLyricist"), "작사·작곡");
+    assert.equal(normalizeCreditsFmRole("Writer"), "작사·작곡");
+    assert.equal(normalizeCreditsFmRole("Lyrics by"), "작사");
+    assert.equal(normalizeCreditsFmRole("Author"), "작사");
     assert.equal(normalizeCreditsFmRole("arranger", "producer"), "편곡");
   });
 
