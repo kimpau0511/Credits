@@ -178,5 +178,13 @@ describe("music credit normalization", () => {
     const teddyNode = buildCooccurrenceNetwork([teddy]).nodes[0];
     assert.equal(teddyNode.externalIpi, "teddy");
     assert.equal(teddyNode.externalMbid, "teddy");
+
+    const denzil = consolidateMusicCredits([
+      { creatorId: "ipi:denzil-a", externalIpi: "denzil-a", name: "DENZIL A REMEDIOS", role: "작곡", source: "Credits.fm" },
+      { creatorId: "credits:denzil-dr", name: "DENZIL 'DR' REMEDIOS", role: "편곡", source: "Credits.fm" },
+      { creatorId: "credits:denzil", name: "Denzil Remedios", role: "작사·작곡", source: "Credits.fm" },
+    ]);
+    assert.deepEqual([...new Set(denzil.map(credit => credit.name))], ["Denzil Remedios"]);
+    assert.equal(new Set(denzil.map(credit => credit.creatorId)).size, 1);
   });
 });

@@ -39,6 +39,7 @@ create table if not exists public.creator_profiles (
   scanned_works integer not null default 0,
   confidence text not null default 'limited' check (confidence in ('verified', 'limited')),
   status text not null default 'complete' check (status in ('complete')),
+  cache_version integer not null default 2,
   profile jsonb not null,
   completed_at timestamptz not null default now(),
   expires_at timestamptz not null,
@@ -46,6 +47,8 @@ create table if not exists public.creator_profiles (
   updated_at timestamptz not null default now(),
   unique (user_id, creator_key)
 );
+
+alter table public.creator_profiles add column if not exists cache_version integer not null default 1;
 
 create index if not exists research_tracks_user_created_idx on public.research_tracks(user_id, created_at desc);
 create index if not exists research_credits_track_idx on public.research_credits(track_id);

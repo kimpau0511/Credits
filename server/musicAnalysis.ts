@@ -22,6 +22,10 @@ const CREATOR_ALIAS_GROUPS = [
     canonicalName: "TEDDY",
     aliases: ["TEDDY", "PARK HONG JUN", "PARK HONG-JUN", "HONG JUN PARK", "박홍준"],
   },
+  {
+    canonicalName: "Denzil Remedios",
+    aliases: ["DENZIL REMEDIOS", "DENZIL A REMEDIOS", "DENZIL 'DR' REMEDIOS", "Denzil Remedios"],
+  },
 ] as const;
 
 export type CreditRole = "아티스트" | "작사" | "작곡" | "작사·작곡" | "편곡" | "프로듀싱" | "연주" | "기타";
@@ -72,7 +76,7 @@ export type MusicAnalysis = {
 type MbArtist = { id: string; name: string; score?: number; aliases?: Array<{ name?: string }> };
 type MbRelation = { type?: string; "target-type"?: string; artist?: MbArtist; work?: { id: string }; recording?: { id: string; title?: string } };
 type MbWork = { id: string; title: string; "first-release-date"?: string; relations?: MbRelation[] };
-type MbRecording = { id: string; title: string; score?: number; length?: number; "first-release-date"?: string; "artist-credit"?: Array<{ artist?: MbArtist; name?: string }>; relations?: MbRelation[]; releases?: Array<{ title?: string; date?: string }>; genres?: Array<{ name?: string }> };
+type MbRecording = { id: string; title: string; score?: number; length?: number; "first-release-date"?: string; "artist-credit"?: Array<{ artist?: MbArtist; name?: string }>; isrcs?: string[]; relations?: MbRelation[]; releases?: Array<{ title?: string; date?: string }>; genres?: Array<{ name?: string }> };
 type CreditsSearchRecording = { isrc: string; title: string; artist_names?: string[]; release_date?: string };
 type CreditsSearchResponse = { recordings?: { items?: CreditsSearchRecording[] } };
 type CreditsSongwriter = { name: string; ipi?: string; role?: string };
@@ -91,6 +95,13 @@ const creditsRateWindows: Record<"search" | "lookup", number[]> = { search: [], 
 
 function sleep(ms: number) { return new Promise(resolve => setTimeout(resolve, ms)); }
 function normalizedText(value: string) { return value.toLowerCase().replace(/[^a-z0-9가-힣]/g, ""); }
+function isUsableCreatorName(value: string) {
+  const normalized = normalizedText(value);
+  return Boolean(normalized)
+    && !normalized.includes("inconnucompositeurauteur")
+    && !normalized.includes("unknowncomposer")
+    && !normalized.includes("unknownwriter");
+}
 
 export function profileKindForRoles(roles: CreditRole[]): "artist" | "creator" {
   const hasCreatorRole = roles.some(role => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(role));
@@ -280,6 +291,21 @@ async function creditsFmPost<T>(path: string, body: unknown, timeoutMs = 20_000)
   const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) throw new Error(response.status === 429 ? "CREDITS_RATE_LIMIT" : `CREDITS_FM_${response.status}`);
   return response.json() as Promise<T>;
+}
+
+async function fetchCreditsBatchRecordings(isrcs: string[]) {
+  const chunks = Array.from({ length: Math.ceil(isrcs.length / 20) }, (_, index) => isrcs.slice(index * 20, index * 20 + 20));
+  // Credits.fm batch responses regularly take 10–14 seconds. Keep the batches
+  // concurrent, but leave enough headroom to avoid discarding valid credits.
+  const batches = await Promise.allSettled(chunks.map(chunk => creditsFmPost<CreditsBatchResponse>("/batch", { isrcs: chunk }, 20_000)));
+  const unique = new Map<string, CreditsIsrcResponse>();
+  for (const batch of batches) {
+    if (batch.status !== "fulfilled") continue;
+    for (const recording of Object.values(batch.value.isrcs ?? {})) {
+      if ("isrc" in recording && recording.isrc) unique.set(recording.isrc, recording);
+    }
+  }
+  return Array.from(unique.values());
 }
 
 export function normalizeCreditRole(relationType?: string): CreditRole {
@@ -515,16 +541,7 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
   let recordings: CreditsIsrcResponse[] = [];
   if (catalogIsrcs.length) {
     try {
-      const chunks = Array.from({ length: Math.ceil(catalogIsrcs.length / 20) }, (_, index) => catalogIsrcs.slice(index * 20, index * 20 + 20));
-      const batches = await Promise.allSettled(chunks.map(isrcs => creditsFmPost<CreditsBatchResponse>("/batch", { isrcs })));
-      const unique = new Map<string, CreditsIsrcResponse>();
-      for (const batch of batches) {
-        if (batch.status !== "fulfilled") continue;
-        for (const recording of Object.values(batch.value.isrcs ?? {})) {
-          if ("isrc" in recording && recording.isrc) unique.set(recording.isrc, recording);
-        }
-      }
-      recordings = Array.from(unique.values());
+      recordings = await fetchCreditsBatchRecordings(catalogIsrcs);
     } catch (error) {
       console.warn("[Creator Signal] Credits.fm batch profile fallback", error);
     }
@@ -586,7 +603,7 @@ async function getMusicBrainzArtistProfile(input: { creatorId: string; name: str
   let totalRecordings = 0;
   while (recordings.length < PROFILE_SEARCH_MAX) {
     const offset = recordings.length;
-    const response = await musicBrainzRequest<{ recordings?: MbRecording[]; "recording-count"?: number }>(`/recording?artist=${encodeURIComponent(id)}&limit=100&offset=${offset}&inc=artist-credits&fmt=json`);
+    const response = await musicBrainzRequest<{ recordings?: MbRecording[]; "recording-count"?: number }>(`/recording?artist=${encodeURIComponent(id)}&limit=100&offset=${offset}&inc=artist-credits+isrcs+work-rels&fmt=json`);
     const page = response.recordings ?? [];
     totalRecordings = response["recording-count"] ?? page.length;
     recordings.push(...page);
@@ -600,25 +617,66 @@ async function getMusicBrainzArtistProfile(input: { creatorId: string; name: str
     if (!existing || (recording["first-release-date"] ?? "9999") < (existing["first-release-date"] ?? "9999")) byTitle.set(key, recording);
   }
   const uniqueRecordings = Array.from(byTitle.values());
-  const creditSets = uniqueRecordings.map(recording => consolidateMusicCredits(performanceCredits(recording)).filter(credit => credit.role === "아티스트"));
+  const coArtistRecordings = new Map<string, MbRecording>();
+  for (const recording of exactRecordings) {
+    const artistIds = (recording["artist-credit"] ?? []).flatMap(credit => credit.artist?.id ? [credit.artist.id] : []).sort().join(":");
+    const key = `${normalizedText(recording.title)}:${artistIds}`;
+    const existing = coArtistRecordings.get(key);
+    if (!existing || (recording["first-release-date"] ?? "9999") < (existing["first-release-date"] ?? "9999")) coArtistRecordings.set(key, recording);
+  }
+  const creativeRoles: CreditRole[] = ["작곡", "작사", "작사·작곡", "편곡", "프로듀싱"];
+  const workReferences = new Map<string, { id: string; title: string; releaseDate?: string }>();
+  for (const recording of [...exactRecordings].sort((first, second) =>
+    (second["first-release-date"] ?? "").localeCompare(first["first-release-date"] ?? ""))) {
+    for (const relation of recording.relations ?? []) {
+      if (!relation.work?.id || workReferences.has(relation.work.id)) continue;
+      workReferences.set(relation.work.id, { id: relation.work.id, title: recording.title, releaseDate: recording["first-release-date"] });
+    }
+  }
+  const collaborationRows: Array<{ work: MbWork; credits: MusicCredit[] }> = [];
+  const sampledWorkReferences = Array.from(workReferences.values()).slice(0, 8);
+  const workResults = await Promise.allSettled(sampledWorkReferences.map(async (reference, index) => {
+    // Start requests one second apart to respect MusicBrainz policy while allowing
+    // slow response bodies to overlap instead of blocking the next lookup.
+    if (index) await sleep(index * 1_050);
+      const work = await musicBrainzRequest<MbWork>(`/work/${encodeURIComponent(reference.id)}?inc=artist-rels&fmt=json`, { timeoutMs: 6_000, attempts: 1 });
+      const credits = consolidateMusicCredits([
+        { creatorId: input.creatorId, name: input.name, role: "아티스트", source: "MusicBrainz", externalMbid: id },
+        ...creditsFromArtistRelations(work.relations),
+      ]);
+      return { work: { ...work, "first-release-date": reference.releaseDate }, credits };
+  }));
+  for (const result of workResults) {
+    if (result.status === "fulfilled") collaborationRows.push(result.value);
+  }
+  const verifiedCollaborationRows = collaborationRows.filter(row => row.credits.some(credit => creativeRoles.includes(credit.role)));
+  const creditSets = verifiedCollaborationRows.length
+    ? verifiedCollaborationRows.map(row => row.credits)
+    : uniqueRecordings.map(recording => consolidateMusicCredits(performanceCredits(recording)).filter(credit => credit.role === "아티스트"));
   const network = buildCooccurrenceNetwork(creditSets);
+  const scannedWorks = verifiedCollaborationRows.length || uniqueRecordings.length;
   const collaborators = network.edges.filter(edge => edge.source === input.creatorId || edge.target === input.creatorId).map(edge => {
     const collaboratorId = edge.source === input.creatorId ? edge.target : edge.source;
     const node = network.nodes.find(candidate => candidate.id === collaboratorId);
-    return node ? { creatorId: node.id, name: node.name, roles: node.roles, workCount: edge.weight, sharePercent: Math.round((edge.weight / Math.max(uniqueRecordings.length, 1)) * 100) } : undefined;
-  }).filter((item): item is CollaboratorSignal => Boolean(item)).sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 5);
+    return node ? { creatorId: node.id, name: node.name, roles: node.roles, workCount: edge.weight, sharePercent: Math.round((edge.weight / Math.max(scannedWorks, 1)) * 100) } : undefined;
+  }).filter((item): item is CollaboratorSignal => Boolean(item))
+    .filter(item => isUsableCreatorName(item.name) && item.roles.some(role => creativeRoles.includes(role)))
+    .sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 10);
   const works = uniqueRecordings.map(recording => ({ id: recording.id, title: recording.title, releaseDate: recording["first-release-date"], relevance: 0 }))
     .sort((first, second) => (second.releaseDate ?? "").localeCompare(first.releaseDate ?? "") || first.title.localeCompare(second.title));
   return {
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
     works: works.slice(0, RECENT_WORKS_LIMIT),
     collaborators,
-    artistCollaborations: [],
+    artistCollaborations: buildArtistCollaborations(Array.from(coArtistRecordings.values()).map(recording => ({
+      work: { id: recording.id, title: recording.title, releaseDate: recording["first-release-date"], relevance: 0 },
+      artists: (recording["artist-credit"] ?? []).flatMap(credit => credit.artist && credit.artist.id !== id ? [{ id: credit.artist.id, name: credit.artist.name || credit.name || "Unknown artist" }] : []),
+    }))),
     network,
-    scannedWorks: uniqueRecordings.length,
-    confidence: "verified",
+    scannedWorks,
+    confidence: verifiedCollaborationRows.length >= 3 && collaborators.length ? "verified" : "limited",
     worksOrder: "recent",
-    sourceNote: `MusicBrainz에서 최대 500개 한도로 ${recordings.length}${recordings.length < totalRecordings ? `/${totalRecordings}` : ""}개 녹음을 조회하고, ${input.name}의 아티스트 ID가 실제 크레딧에 포함된 ${exactRecordings.length}개만 남겼습니다. 동일 제목을 원 발매일 기준으로 정리한 고유 곡은 ${uniqueRecordings.length}개입니다. 협업 통계는 공동 아티스트 크레딧 기준입니다.`,
+    sourceNote: `MusicBrainz에서 최대 500개 한도로 ${recordings.length}${recordings.length < totalRecordings ? `/${totalRecordings}` : ""}개 녹음을 조회하고, ${input.name}의 아티스트 ID가 실제 포함된 ${exactRecordings.length}개만 남겼습니다. 연결된 원작 ${workReferences.size}개 중 최근 ${sampledWorkReferences.length}개 관계를 확인했으며, 창작자 크레딧이 확인된 고유 작품 ${verifiedCollaborationRows.length}개에서 작곡가·작사가·프로듀서 협업 횟수를 계산했습니다. 이 수치는 확인된 작품 표본이며, 공동 명의 아티스트와 창작자 협업은 서로 분리해 한 작품당 한 번만 집계합니다.`,
   };
 }
 

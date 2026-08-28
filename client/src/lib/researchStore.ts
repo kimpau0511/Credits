@@ -29,6 +29,7 @@ export type SavedCreatorProfile = {
 };
 
 export const CREATOR_PROFILE_CACHE_MS = 1000 * 60 * 60 * 24 * 30;
+export const CREATOR_PROFILE_CACHE_VERSION = 2;
 
 export async function saveAnalysis(analysis: MusicAnalysis, userId: string, accessToken: string) {
   const trackKey = analysis.track.id.includes("-") ? `mbid:${analysis.track.id}` : `isrc:${analysis.track.id}`;
@@ -80,7 +81,7 @@ export function loadSavedTracks(accessToken: string) {
 
 export async function loadCreatorProfile(creatorKey: string, accessToken: string): Promise<SavedCreatorProfile | undefined> {
   const rows = await supabaseRest<Array<{ profile: CreatorProfile; updated_at: string; expires_at: string }>>(
-    `creator_profiles?select=profile,updated_at,expires_at&creator_key=eq.${encodeURIComponent(creatorKey)}&status=eq.complete&limit=1`,
+    `creator_profiles?select=profile,updated_at,expires_at&creator_key=eq.${encodeURIComponent(creatorKey)}&status=eq.complete&cache_version=eq.${CREATOR_PROFILE_CACHE_VERSION}&limit=1`,
     accessToken,
   );
   const row = rows[0];
@@ -100,6 +101,7 @@ export async function saveCreatorProfile(profile: CreatorProfile, creatorKey: st
       scanned_works: profile.scannedWorks,
       confidence: profile.confidence,
       status: "complete",
+      cache_version: CREATOR_PROFILE_CACHE_VERSION,
       profile,
       completed_at: now.toISOString(),
       expires_at: new Date(now.getTime() + CREATOR_PROFILE_CACHE_MS).toISOString(),
