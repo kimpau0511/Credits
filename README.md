@@ -6,7 +6,7 @@
 
 - 검색 시 Credits.fm을 우선 조회하고 MusicBrainz를 보조 소스로 사용합니다. `CREDITS_FM_API_KEY`가 설정되면 서버 요청에 `x-api-key` 헤더를 적용해 상향된 호출 한도를 사용합니다.
 - 사용자는 Supabase 이메일 계정으로 로그인합니다.
-- 모든 음악 조회 API는 유효한 Supabase 로그인 토큰을 요구하며 사용자별 분당 30회로 제한합니다.
+- 로그인과 사용자별 저장은 Supabase가 담당하고, 음악 검색은 Render 서버가 외부 음악 API에서 독립적으로 수행합니다.
 - 곡을 선택하면 기본 크레딧을 먼저 표시하고, 인물별 300~500곡 카탈로그·협업 분석은 별도 요청으로 진행합니다.
 - 분석이 끝난 곡과 크레딧은 사용자의 Supabase 수집함에 자동 저장됩니다. 같은 곡을 다시 분석하면 중복 생성하지 않고 최신 데이터로 갱신합니다.
 - 완성된 인물 프로필은 사용자별 `creator_profiles`에 30일간 캐시됩니다. 다음 검색에서는 저장 결과를 먼저 표시하고, 만료된 결과만 화면 뒤에서 다시 분석합니다.
@@ -23,11 +23,9 @@
 ```bash
 VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_ANON_KEY=your_publishable_anon_key
-ALLOWED_USER_EMAILS=friend@example.com,owner@example.com
 ```
 
 anon 키는 브라우저 공개용 키이며 실제 데이터 접근은 `schema.sql`의 Row Level Security가 사용자별로 제한합니다. `service_role` 키는 이 프로젝트에 넣지 않습니다.
-`ALLOWED_USER_EMAILS`는 선택 항목이지만 1:1 비공개 운영에서는 등록을 권장합니다. 쉼표로 허용 계정을 구분하며, 설정하면 그 계정들만 서버의 음악 조회 API를 사용할 수 있습니다. 대상 계정을 만든 뒤 Supabase Authentication 설정에서 신규 가입도 꺼 두면 외부 사용을 막을 수 있습니다.
 
 ## 로컬 실행
 

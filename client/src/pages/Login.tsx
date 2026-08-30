@@ -30,7 +30,7 @@ export default function Login() {
       <p className="text-[10px] font-mono tracking-[.08em] text-white/35">CReadits Search · PRIVATE RESEARCH WORKSPACE</p>
     </section>
     <section className="flex items-center justify-center p-6 sm:p-12"><form onSubmit={submit} className="w-full max-w-md border border-white/20 bg-[#181818] p-7 sm:p-10">
-      <LockKeyhole className="size-7" /><p className="mt-8 text-[10px] font-mono tracking-[.15em] text-white/45">{mode === "login" ? "MEMBER LOGIN" : "CREATE ACCOUNT"}</p><h2 className="mt-3 text-3xl font-black">{mode === "login" ? "리서치 공간 로그인" : "계정 만들기"}</h2>
+      <LockKeyhole className="size-7" /><p className="mt-8 text-[10px] font-mono tracking-[.15em] text-white/45">{mode === "login" ? "CReadits Search · MEMBER LOGIN" : "CReadits Search · CREATE ACCOUNT"}</p><h2 className="mt-3 text-3xl font-black">{mode === "login" ? "검색 사이트에 로그인" : "계정 만들기"}</h2>
       {!auth.configured && <div className="mt-6 border border-amber-300/40 bg-amber-300/10 p-4 text-xs leading-5 text-amber-100">Supabase 연결 전입니다. 배포 환경에 VITE_SUPABASE_URL과 VITE_SUPABASE_ANON_KEY를 등록하면 로그인이 활성화됩니다.</div>}
       <label className="mt-8 block border-b border-white/25 pb-3"><span className="text-[10px] text-white/45">EMAIL</span><input type="email" required value={email} onChange={event => setEmail(event.target.value)} className="mt-2 w-full bg-transparent text-sm outline-none" placeholder="name@company.com" /></label>
       <label className="mt-5 block border-b border-white/25 pb-3"><span className="text-[10px] text-white/45">PASSWORD</span><input type="password" required minLength={8} value={password} onChange={event => setPassword(event.target.value)} className="mt-2 w-full bg-transparent text-sm outline-none" placeholder="8자 이상" /></label>

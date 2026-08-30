@@ -16,5 +16,3 @@ services:
         sync: false
       - key: VITE_SUPABASE_ANON_KEY
         sync: false
-      - key: ALLOWED_USER_EMAILS
-        sync: false

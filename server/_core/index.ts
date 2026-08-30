@@ -22,7 +22,6 @@ async function startServer() {
     "/api/trpc",
     createExpressMiddleware({
       router: appRouter,
-      createContext: ({ req }) => ({ authorization: req.headers.authorization }),
     })
   );
   if (process.env.NODE_ENV === "development") {
