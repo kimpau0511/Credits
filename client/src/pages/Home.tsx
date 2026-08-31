@@ -102,13 +102,14 @@ export default function Home() {
   const search = trpc.music.analyze.useMutation({ onMutate: () => { setAnalysis(undefined); setSaveState(""); }, onSuccess: result => { setAnalysis(result); setError(""); setTimeout(() => document.getElementById("results")?.scrollIntoView({ behavior: "smooth" }), 20); if (session) { setSaveState("saving"); void saveAnalysis(result, session.user.id, session.access_token).then(() => setSaveState("saved")).catch(() => setSaveState("failed")); } }, onError: () => setError(text("분석 데이터를 불러오지 못했습니다. 표기를 바꿔 다시 시도해 주세요.", "Unable to load analysis. Try a different title or artist spelling.")) });
   function analyzeCandidate(candidate: TrackCandidate) { setCandidates(undefined); setAnalysis(undefined); search.mutate({ title: candidate.title, artist: candidate.artist, isrc: candidate.isrc, mbid: candidate.source === "MusicBrainz" ? candidate.id.replace("mbid:", "") : undefined }); }
   const candidateSearch = trpc.music.searchCandidates.useMutation({ onSuccess: items => { if (!items.length) { setError(text("일치하는 곡을 찾지 못했습니다.", "No matching recording was found.")); return; } if (items.length === 1) analyzeCandidate(items[0]); else setCandidates(items); }, onError: () => setError(text("곡 후보를 불러오지 못했습니다.", "Unable to load matching tracks.")) });
-  const suggestionSearch = trpc.music.searchCandidates.useMutation({ onSuccess: (items, variables) => { if (variables.title === suggestionQuery.current) setSuggestions(items.slice(0, 8)); }, onError: () => setSuggestions([]) });
+  const suggestionSearch = trpc.music.searchCandidates.useMutation({ onSuccess: (items, variables) => { const key = `${variables.title.trim()}::${variables.artist?.trim() ?? ""}`; if (key === suggestionQuery.current) setSuggestions(items.slice(0, 8)); }, onError: () => setSuggestions([]) });
   useEffect(() => {
     const query = title.trim();
     if (query.length < 2) { suggestionQuery.current = ""; setSuggestions([]); return; }
     const timer = window.setTimeout(() => {
-      suggestionQuery.current = query;
-      suggestionSearch.mutate({ title: query, artist: artist.trim() || undefined });
+      const requestArtist = artist.trim() || undefined;
+      suggestionQuery.current = `${query}::${requestArtist ?? ""}`;
+      suggestionSearch.mutate({ title: query, artist: requestArtist });
     }, 450);
     return () => window.clearTimeout(timer);
   }, [title, artist]);
