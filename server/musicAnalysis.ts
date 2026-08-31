@@ -270,7 +270,16 @@ async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lo
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { headers, signal: AbortSignal.timeout(timeoutMs) });
+      let response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { headers, signal: AbortSignal.timeout(timeoutMs) });
+      // A stale or incorrectly copied Render key must not disable the public
+      // Credits.fm fallback. Retry once without the key before switching data
+      // providers; the real key never leaves the server.
+      if (CREDITS_FM_API_KEY && [401, 403].includes(response.status)) {
+        response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, {
+          headers: { Accept: "application/json" },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+      }
       if (response.ok) return response.json() as Promise<T>;
       const error = new Error(response.status === 429 ? "CREDITS_RATE_LIMIT" : `CREDITS_FM_${response.status}`);
       if (response.status < 500 || attempt === attempts - 1) throw error;
@@ -288,7 +297,15 @@ async function creditsFmPost<T>(path: string, body: unknown, timeoutMs = 20_000)
   enforceCreditsRateLimit("lookup");
   const headers: Record<string, string> = { Accept: "application/json", "Content-Type": "application/json" };
   if (CREDITS_FM_API_KEY) headers["x-api-key"] = CREDITS_FM_API_KEY;
-  const response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+  let response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+  if (CREDITS_FM_API_KEY && [401, 403].includes(response.status)) {
+    response = await fetch(`${CREDITS_FM_BASE_URL}${path}`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  }
   if (!response.ok) throw new Error(response.status === 429 ? "CREDITS_RATE_LIMIT" : `CREDITS_FM_${response.status}`);
   return response.json() as Promise<T>;
 }
@@ -408,7 +425,14 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
     creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(query)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", resolvedArtist ? 3_500 : 6_000, 1).catch(() => undefined),
     musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(musicBrainzQuery)}&limit=25&fmt=json`, { timeoutMs: 3_500, attempts: 1 }).catch(() => undefined),
   ]);
-  const creditsCandidates = Array.from(new Map((creditsSearch?.recordings?.items ?? []).map(item => [item.isrc, {
+  const originalCreditsSearch = artist && normalizedText(searchArtist ?? "") !== normalizedText(artist)
+    ? await creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent([title, artist].join(" "))}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 5_000, 1).catch(() => undefined)
+    : undefined;
+  const allCreditsItems = [
+    ...(creditsSearch?.recordings?.items ?? []),
+    ...(originalCreditsSearch?.recordings?.items ?? []),
+  ];
+  const creditsCandidates = Array.from(new Map<string, TrackCandidate>(allCreditsItems.map(item => [item.isrc, {
     id: `isrc:${item.isrc}`,
     isrc: item.isrc,
     title: item.title,
