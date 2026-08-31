@@ -79,6 +79,8 @@ describe("music credit normalization", () => {
     assert.equal(normalizeCreditsFmRole("Lyrics by"), "작사");
     assert.equal(normalizeCreditsFmRole("Author"), "작사");
     assert.equal(normalizeCreditsFmRole("arranger", "producer"), "편곡");
+    assert.equal(normalizeCreditsFmRole("mix", "producer"), "기타");
+    assert.equal(normalizeCreditsFmRole("engineer", "producer"), "기타");
   });
 
   it("routes every selectable role to the correct profile catalog", () => {

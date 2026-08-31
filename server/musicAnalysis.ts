@@ -89,6 +89,7 @@ type CacheRecord<T> = { createdAt: number; result: T };
 const analysisCache = new Map<string, CacheRecord<MusicAnalysis>>();
 const creatorCache = new Map<string, CacheRecord<CreatorProfile>>();
 const candidateCache = new Map<string, CacheRecord<TrackCandidate[]>>();
+const creditsRecordingCache = new Map<string, CacheRecord<CreditsIsrcResponse>>();
 const identityCache = new Map<string, MbArtist | null>();
 let lastMusicBrainzRequestAt = 0;
 const creditsRateWindows: Record<"search" | "lookup", number[]> = { search: [], lookup: [] };
@@ -327,7 +328,10 @@ async function fetchCreditsBatchRecordings(isrcs: string[]) {
   for (const batch of batches) {
     if (batch.status !== "fulfilled") continue;
     for (const recording of Object.values(batch.value.isrcs ?? {})) {
-      if ("isrc" in recording && recording.isrc) unique.set(recording.isrc, recording);
+      if ("isrc" in recording && recording.isrc) {
+        unique.set(recording.isrc, recording);
+        creditsRecordingCache.set(recording.isrc, { createdAt: Date.now(), result: recording });
+      }
     }
   }
   return Array.from(unique.values());
@@ -345,7 +349,8 @@ export function normalizeCreditRole(relationType?: string): CreditRole {
 }
 
 export function normalizeCreditsFmRole(role?: string, creditType?: string): CreditRole {
-  const normalized = `${role ?? ""} ${creditType ?? ""}`.toLowerCase().replace(/[^a-z]/g, "");
+  const normalizedRole = (role ?? "").toLowerCase().replace(/[^a-z]/g, "");
+  const normalized = normalizedRole || (creditType ?? "").toLowerCase().replace(/[^a-z]/g, "");
   if (normalized.includes("composerlyricist") || normalized.includes("songwriter") || normalized === "writer") return "작사·작곡";
   if (normalized.includes("composer")) return "작곡";
   if (normalized.includes("lyricist") || normalized.includes("lyrics") || normalized.includes("author")) return "작사";
@@ -416,7 +421,9 @@ async function creditsFmTrack(title: string, artist?: string): Promise<CreditsIs
   const search = await creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(query)}`, "search");
   const candidate = selectBestCreditsRecording(search.recordings?.items ?? [], title, artist);
   if (!candidate?.isrc) return undefined;
-  return creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(candidate.isrc)}`);
+  const recording = await creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(candidate.isrc)}`, "lookup", 20_000, 1);
+  creditsRecordingCache.set(candidate.isrc, { createdAt: Date.now(), result: recording });
+  return recording;
 }
 
 export async function searchMusicCandidates(input: { title: string; artist?: string }): Promise<TrackCandidate[]> {
@@ -434,14 +441,14 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
   const musicBrainzQuery = providerArtist ? `recording:"${providerTitle}" AND artist:"${providerArtist}"` : `recording:"${providerTitle}"`;
   const [creditsSearch, fallback] = await Promise.all([
     creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(query)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", resolvedArtist ? 3_500 : 6_000, 1).catch(() => undefined),
-    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(musicBrainzQuery)}&limit=25&fmt=json`, { timeoutMs: 3_500, attempts: 1 }).catch(() => undefined),
+    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(musicBrainzQuery)}&limit=25&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 3_500, attempts: 1 }).catch(() => undefined),
   ]);
   const originalCreditsSearch = artist && normalizedText(searchArtist ?? "") !== normalizedText(artist)
     ? await creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent([providerTitle, originalProviderArtist].filter(Boolean).join(" "))}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 5_000, 1).catch(() => undefined)
     : undefined;
   const [titleOnlyCreditsSearch, titleOnlyFallback] = artist ? await Promise.all([
     creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(providerTitle)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 5_000, 1).catch(() => undefined),
-    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:"${providerTitle}"`)}&limit=100&fmt=json`, { timeoutMs: 5_000, attempts: 1 }).catch(() => undefined),
+    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:"${providerTitle}"`)}&limit=100&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 5_000, attempts: 1 }).catch(() => undefined),
   ]) : [undefined, undefined];
   const rawCreditsItems = [
     ...(creditsSearch?.recordings?.items ?? []),
@@ -478,6 +485,7 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
   }])).values());
   const musicBrainzCandidates = Array.from(new Map([...(fallback?.recordings ?? []), ...(titleOnlyFallback?.recordings ?? [])].map(recording => [recording.id, {
     id: `mbid:${recording.id}`,
+    isrc: recording.isrcs?.[0],
     title: recording.title,
     artist: primaryArtist(recording)?.name || artist || "Unknown artist",
     releaseDate: recording["first-release-date"],
@@ -485,9 +493,10 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
   }])).values());
   let result = rankTrackCandidates([...creditsCandidates, ...musicBrainzCandidates], title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
   if (!result.length) {
-    const emergency = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:${providerTitle}`)}&limit=25&fmt=json`, { timeoutMs: 4_000, attempts: 1 }).catch(() => undefined);
+    const emergency = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:${providerTitle}`)}&limit=25&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 4_000, attempts: 1 }).catch(() => undefined);
     result = rankTrackCandidates((emergency?.recordings ?? []).map(recording => ({
       id: `mbid:${recording.id}`,
+      isrc: recording.isrcs?.[0],
       title: recording.title,
       artist: primaryArtist(recording)?.name || artist || "Unknown artist",
       releaseDate: recording["first-release-date"],
@@ -897,7 +906,7 @@ export async function getCreatorProfile(input: { creatorId: string; name: string
 async function musicBrainzFallback(title: string, artist?: string, isrc?: string, mbid?: string): Promise<MusicAnalysis> {
   let match: Pick<MbRecording, "id"> | undefined = mbid ? { id: mbid } : undefined;
   if (isrc) {
-    const lookup = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/isrc/${encodeURIComponent(isrc)}?inc=recordings+artist-credits&fmt=json`).catch(() => undefined);
+    const lookup = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/isrc/${encodeURIComponent(isrc)}?inc=artist-credits&fmt=json`).catch(() => undefined);
     const expectedArtist = artist ? normalizedText(artist) : "";
     match = lookup?.recordings?.find(recording => !expectedArtist || (recording["artist-credit"] ?? []).some(credit => normalizedText(credit.artist?.name ?? credit.name ?? "").includes(expectedArtist)))
       ?? lookup?.recordings?.[0];
@@ -927,7 +936,15 @@ export async function analyzeMusic(input: { title: string; artist?: string; isrc
   const key = input.isrc ? `isrc:${input.isrc}` : input.mbid ? `mbid:${input.mbid}` : `${title.toLowerCase()}::${artist?.toLowerCase() ?? ""}`;
   const cached = analysisCache.get(key);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return { ...cached.result, cache: { state: "cached", storedAt: cached.createdAt, expiresAt: cached.createdAt + CACHE_TTL_MS } };
-  const creditsRecording = await (input.mbid ? Promise.resolve(undefined) : input.isrc ? creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(input.isrc)}`, "lookup", 5_000, 1) : creditsFmTrack(title, artist)).catch(error => { console.warn("[Creator Signal] Credits.fm fallback", error); return undefined; });
+  const cachedCreditsRecording = input.isrc ? creditsRecordingCache.get(input.isrc) : undefined;
+  const creditsRecording = await (input.isrc
+    ? cachedCreditsRecording && Date.now() - cachedCreditsRecording.createdAt < CACHE_TTL_MS
+      ? Promise.resolve(cachedCreditsRecording.result)
+      : creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(input.isrc)}`, "lookup", 20_000, 1).then(recording => {
+          creditsRecordingCache.set(input.isrc!, { createdAt: Date.now(), result: recording });
+          return recording;
+        })
+    : input.mbid ? Promise.resolve(undefined) : creditsFmTrack(title, artist)).catch(error => { console.warn("[Creator Signal] Credits.fm fallback", error); return undefined; });
   let result: MusicAnalysis;
   if (creditsRecording) {
     const credits = creditsFromCreditsFm(creditsRecording);
@@ -935,9 +952,10 @@ export async function analyzeMusic(input: { title: string; artist?: string; isrc
     const track = { id: creditsRecording.isrc, title: creditsRecording.song_title ?? creditsRecording.recording_title ?? title, artist: creditsRecording.artist_names?.join(", ") ?? artist ?? "Unknown artist", releaseDate: creditsRecording.release_date, album: creditsRecording.album_title ?? creditsRecording.release_title, genres: creditsRecording.genres ?? creditsRecording.songwriter_genres ?? [] };
     const storedAt = Date.now();
     result = { track, credits, network: buildCooccurrenceNetwork([credits]), topTracks: [], briefing: buildBriefing(track, credits, detailed.length ? "enriched" : "limited"), sourceNote: `Credits.fm ISRC ${creditsRecording.isrc} 응답을 우선 사용했습니다. 원본 소스: ${(creditsRecording.sources ?? []).join(", ") || "Credits.fm"}.`, creditsStatus: detailed.length ? "enriched" : "limited", aiModel: "Rule-based credit editor", cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS } };
-    const fallback = await musicBrainzFallback(track.title, track.artist, creditsRecording.isrc).catch(() => undefined);
-    const fallbackDetailed = fallback?.credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role)) ?? [];
-    if (fallback && fallbackDetailed.length) {
+    if (!detailed.length) {
+      const fallback = await musicBrainzFallback(track.title, track.artist, creditsRecording.isrc).catch(() => undefined);
+      const fallbackDetailed = fallback?.credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role)) ?? [];
+      if (fallback && fallbackDetailed.length) {
         const nonCreativeCredits = credits.filter(credit => !["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role));
         const mergedCredits = consolidateMusicCredits([...nonCreativeCredits, ...fallback.credits]);
         const mergedTrack = {
@@ -957,6 +975,7 @@ export async function analyzeMusic(input: { title: string; artist?: string; isrc
           creditsStatus: "enriched",
           sourceNote: `Credits.fm ISRC ${creditsRecording.isrc}의 곡 정보를 사용하고, 역할이 확정된 작사·작곡 크레딧은 MusicBrainz 원작 관계로 교차 검증했습니다.`,
         };
+      }
     }
   } else result = await musicBrainzFallback(title, artist, input.isrc, input.mbid);
   analysisCache.set(key, { createdAt: result.cache.storedAt, result });

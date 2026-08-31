@@ -54,7 +54,8 @@ export function useCreatorProfile(selected?: NetworkNode) {
   const query = trpc.music.creatorProfile.useQuery(input, {
     enabled: shouldAnalyze,
     staleTime: 900_000,
-    retry: false,
+    retry: 2,
+    retryDelay: attempt => Math.min(1_000 * 2 ** attempt, 4_000),
   });
 
   useEffect(() => {
