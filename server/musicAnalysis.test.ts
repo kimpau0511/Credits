@@ -14,6 +14,7 @@ import {
   PROFILE_SEARCH_MIN,
   RECENT_WORKS_LIMIT,
   profileKindForRoles,
+  providerSearchText,
   rankTrackCandidates,
   selectBestCreditsRecording,
   selectBestMusicBrainzArtist,
@@ -27,6 +28,13 @@ const credits: MusicCredit[] = [
 ];
 
 describe("music credit normalization", () => {
+  it("uses one provider query for every casing and apostrophe style", () => {
+    assert.equal(providerSearchText("Please Don't Go"), "please don't go");
+    assert.equal(providerSearchText("PLEASE DON’T GO"), "please don't go");
+    assert.equal(providerSearchText("  please   don`t go  "), "please don't go");
+    assert.equal(providerSearchText("2NE1"), providerSearchText("2ne1"));
+  });
+
   it("keeps recent display and catalog search limits explicit", () => {
     assert.equal(RECENT_WORKS_LIMIT, 12);
     assert.equal(PROFILE_SEARCH_MIN, 300);
