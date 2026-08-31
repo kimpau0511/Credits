@@ -366,7 +366,7 @@ export function rankTrackCandidates(candidates: TrackCandidate[], title: string,
   const score = (candidate: TrackCandidate) => {
     const candidateTitle = normalizedText(candidate.title);
     const candidateArtist = normalizedText(candidate.artist);
-    const titleScore = candidateTitle === expectedTitle ? 1_000 : candidateTitle.startsWith(expectedTitle) ? 500 : candidateTitle.includes(expectedTitle) ? 250 : 0;
+    const titleScore = candidateTitle === expectedTitle ? 1_500 : candidateTitle.startsWith(expectedTitle) ? 500 : candidateTitle.includes(expectedTitle) ? 250 : 0;
     const artistScore = expectedArtist && candidateArtist.includes(expectedArtist) ? 600 : 0;
     const koreanReleaseScore = candidateTitle === expectedTitle && candidate.isrc?.toUpperCase().startsWith("KR") ? 300 : 0;
     return titleScore + artistScore + koreanReleaseScore + (candidate.source === "Credits.fm" ? 20 : 0) + (candidate.releaseDate ? 5 : 0);
@@ -428,11 +428,36 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
   const originalCreditsSearch = artist && normalizedText(searchArtist ?? "") !== normalizedText(artist)
     ? await creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent([title, artist].join(" "))}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 5_000, 1).catch(() => undefined)
     : undefined;
-  const allCreditsItems = [
+  const [titleOnlyCreditsSearch, titleOnlyFallback] = artist ? await Promise.all([
+    creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(title)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 5_000, 1).catch(() => undefined),
+    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:"${title}"`)}&limit=100&fmt=json`, { timeoutMs: 5_000, attempts: 1 }).catch(() => undefined),
+  ]) : [undefined, undefined];
+  const rawCreditsItems = [
     ...(creditsSearch?.recordings?.items ?? []),
     ...(originalCreditsSearch?.recordings?.items ?? []),
+    ...(titleOnlyCreditsSearch?.recordings?.items ?? []),
   ];
-  const creditsCandidates = Array.from(new Map<string, TrackCandidate>(allCreditsItems.map(item => [item.isrc, {
+  // Credits.fm search occasionally returns an ISRC and title without its
+  // artist. Hydrate a bounded set in one batch so exact K-pop releases do not
+  // lose to unrelated same-title recordings merely because the preview row is
+  // incomplete.
+  const missingArtistIsrcs = Array.from(new Set(rawCreditsItems
+    .filter(item => item.isrc && !item.artist_names?.length)
+    .map(item => item.isrc))).slice(0, 20);
+  const hydratedRecordings = missingArtistIsrcs.length
+    ? await fetchCreditsBatchRecordings(missingArtistIsrcs).catch(() => [])
+    : [];
+  const creditsItemsByIsrc = new Map(rawCreditsItems.map(item => [item.isrc, item]));
+  for (const recording of hydratedRecordings) {
+    const current = creditsItemsByIsrc.get(recording.isrc);
+    creditsItemsByIsrc.set(recording.isrc, {
+      isrc: recording.isrc,
+      title: recording.song_title ?? recording.recording_title ?? current?.title ?? title,
+      artist_names: recording.artist_names?.length ? recording.artist_names : current?.artist_names,
+      release_date: recording.release_date ?? current?.release_date,
+    });
+  }
+  const creditsCandidates = Array.from(new Map<string, TrackCandidate>(Array.from(creditsItemsByIsrc.values()).map(item => [item.isrc, {
     id: `isrc:${item.isrc}`,
     isrc: item.isrc,
     title: item.title,
@@ -440,13 +465,13 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
     releaseDate: item.release_date,
     source: "Credits.fm" as const,
   }])).values());
-  const musicBrainzCandidates = (fallback?.recordings ?? []).map(recording => ({
+  const musicBrainzCandidates = Array.from(new Map([...(fallback?.recordings ?? []), ...(titleOnlyFallback?.recordings ?? [])].map(recording => [recording.id, {
     id: `mbid:${recording.id}`,
     title: recording.title,
     artist: primaryArtist(recording)?.name || artist || "Unknown artist",
     releaseDate: recording["first-release-date"],
     source: "MusicBrainz" as const,
-  }));
+  }])).values());
   let result = rankTrackCandidates([...creditsCandidates, ...musicBrainzCandidates], title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
   if (!result.length) {
     const emergency = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:${title}`)}&limit=25&fmt=json`, { timeoutMs: 4_000, attempts: 1 }).catch(() => undefined);
