@@ -390,6 +390,22 @@ export function rankTrackCandidates(candidates: TrackCandidate[], title: string,
     .map(item => item.candidate);
 }
 
+export function mergeDuplicateTrackCandidates(candidates: TrackCandidate[]) {
+  const unique = new Map<string, TrackCandidate>();
+  for (const candidate of candidates) {
+    const key = candidate.isrc ? `isrc:${candidate.isrc.toUpperCase()}` : candidate.id;
+    const current = unique.get(key);
+    if (!current) { unique.set(key, candidate); continue; }
+    const preferred = current.source === "Credits.fm" ? current : candidate.source === "Credits.fm" ? candidate : current;
+    unique.set(key, {
+      ...preferred,
+      releaseDate: preferred.releaseDate ?? current.releaseDate ?? candidate.releaseDate,
+      isrc: preferred.isrc ?? current.isrc ?? candidate.isrc,
+    });
+  }
+  return Array.from(unique.values());
+}
+
 function creditsFromCreditsFm(recording: CreditsIsrcResponse): MusicCredit[] {
   const credits = new Map<string, MusicCredit>();
   const performers = recording.performers ?? [];
@@ -432,27 +448,36 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
   const cacheKey = `${normalizedText(title)}::${normalizedText(artist ?? "")}`;
   const cached = candidateCache.get(cacheKey);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return cached.result;
-  const resolvedArtist = artist ? await resolveMusicBrainzIdentity(artist, { timeoutMs: 3_000, attempts: 1 }).catch(() => undefined) : undefined;
-  const searchArtist = resolvedArtist?.name ?? artist;
+  const resolvedArtistPromise = artist ? resolveMusicBrainzIdentity(artist, { timeoutMs: 5_000, attempts: 1 }).catch(() => undefined) : Promise.resolve(undefined);
+  const searchArtist = artist;
   const providerTitle = providerSearchText(title);
   const providerArtist = searchArtist ? providerSearchText(searchArtist) : undefined;
-  const originalProviderArtist = artist ? providerSearchText(artist) : undefined;
   const query = [providerTitle, providerArtist].filter(Boolean).join(" ");
   const musicBrainzQuery = providerArtist ? `recording:"${providerTitle}" AND artist:"${providerArtist}"` : `recording:"${providerTitle}"`;
-  const [creditsSearch, fallback] = await Promise.all([
-    creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(query)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", resolvedArtist ? 3_500 : 6_000, 1).catch(() => undefined),
-    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(musicBrainzQuery)}&limit=25&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 3_500, attempts: 1 }).catch(() => undefined),
+  const [creditsSearch, fallback, resolvedArtist] = await Promise.all([
+    creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(query)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 10_000, 1).catch(() => undefined),
+    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(musicBrainzQuery)}&limit=25&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 10_000, attempts: 1 }).catch(() => undefined),
+    resolvedArtistPromise,
   ]);
-  const originalCreditsSearch = artist && normalizedText(searchArtist ?? "") !== normalizedText(artist)
-    ? await creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent([providerTitle, originalProviderArtist].filter(Boolean).join(" "))}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 5_000, 1).catch(() => undefined)
-    : undefined;
-  const [titleOnlyCreditsSearch, titleOnlyFallback] = artist ? await Promise.all([
-    creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(providerTitle)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 5_000, 1).catch(() => undefined),
-    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:"${providerTitle}"`)}&limit=100&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 5_000, attempts: 1 }).catch(() => undefined),
+  const resolvedArtistName = resolvedArtist?.name;
+  const resolvedProviderArtist = resolvedArtistName ? providerSearchText(resolvedArtistName) : undefined;
+  const [resolvedCreditsSearch, resolvedFallback] = artist && resolvedArtistName && resolvedProviderArtist && normalizedText(resolvedArtistName) !== normalizedText(artist)
+    ? await Promise.all([
+        creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent([providerTitle, resolvedProviderArtist].join(" "))}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 10_000, 1).catch(() => undefined),
+        musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:"${providerTitle}" AND artist:"${resolvedProviderArtist}"`)}&limit=25&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 10_000, attempts: 1 }).catch(() => undefined),
+      ])
+    : [undefined, undefined];
+  const initialCreditsItems = [...(creditsSearch?.recordings?.items ?? []), ...(resolvedCreditsSearch?.recordings?.items ?? [])];
+  const initialFallbackRecordings = [...(fallback?.recordings ?? []), ...(resolvedFallback?.recordings ?? [])];
+  const expectedArtist = normalizedText(searchArtist ?? "");
+  const hasExactInitialMatch = initialCreditsItems.some(recording => normalizedText(recording.title) === normalizedText(title) && (recording.artist_names ?? []).some(name => normalizedText(name).includes(expectedArtist)))
+    || initialFallbackRecordings.some(recording => normalizedText(recording.title) === normalizedText(title) && (recording["artist-credit"] ?? []).some(credit => normalizedText(credit.artist?.name ?? credit.name ?? "").includes(expectedArtist)));
+  const [titleOnlyCreditsSearch, titleOnlyFallback] = artist && !hasExactInitialMatch ? await Promise.all([
+    creditsFmRequest<CreditsSearchResponse>(`/search?q=${encodeURIComponent(providerTitle)}&limit=${CANDIDATE_SEARCH_LIMIT}`, "search", 10_000, 1).catch(() => undefined),
+    musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:"${providerTitle}"`)}&limit=100&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 10_000, attempts: 1 }).catch(() => undefined),
   ]) : [undefined, undefined];
   const rawCreditsItems = [
-    ...(creditsSearch?.recordings?.items ?? []),
-    ...(originalCreditsSearch?.recordings?.items ?? []),
+    ...initialCreditsItems,
     ...(titleOnlyCreditsSearch?.recordings?.items ?? []),
   ];
   // Credits.fm search occasionally returns an ISRC and title without its
@@ -483,7 +508,7 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
     releaseDate: item.release_date,
     source: "Credits.fm" as const,
   }])).values());
-  const musicBrainzCandidates = Array.from(new Map([...(fallback?.recordings ?? []), ...(titleOnlyFallback?.recordings ?? [])].map(recording => [recording.id, {
+  const musicBrainzCandidates = Array.from(new Map([...initialFallbackRecordings, ...(titleOnlyFallback?.recordings ?? [])].map(recording => [recording.id, {
     id: `mbid:${recording.id}`,
     isrc: recording.isrcs?.[0],
     title: recording.title,
@@ -491,9 +516,9 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
     releaseDate: recording["first-release-date"],
     source: "MusicBrainz" as const,
   }])).values());
-  let result = rankTrackCandidates([...creditsCandidates, ...musicBrainzCandidates], title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
+  let result = rankTrackCandidates(mergeDuplicateTrackCandidates([...creditsCandidates, ...musicBrainzCandidates]), title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
   if (!result.length) {
-    const emergency = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:${providerTitle}`)}&limit=25&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 4_000, attempts: 1 }).catch(() => undefined);
+    const emergency = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:${providerTitle}`)}&limit=25&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 10_000, attempts: 1 }).catch(() => undefined);
     result = rankTrackCandidates((emergency?.recordings ?? []).map(recording => ({
       id: `mbid:${recording.id}`,
       isrc: recording.isrcs?.[0],

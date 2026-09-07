@@ -18,7 +18,10 @@ export type SavedTrack = {
   release_date?: string;
   album?: string;
   genres: string[];
+  source_note?: string;
+  raw_analysis: MusicAnalysis;
   created_at: string;
+  updated_at: string;
   credits: SavedCredit[];
 };
 
@@ -74,7 +77,7 @@ export async function saveAnalysis(analysis: MusicAnalysis, userId: string, acce
 
 export function loadSavedTracks(accessToken: string) {
   return supabaseRest<SavedTrack[]>(
-    "research_tracks?select=id,track_key,title,artist,release_date,album,genres,created_at,credits:research_credits(id,creator_key,name,role,external_ipi,external_mbid)&order=created_at.desc",
+    "research_tracks?select=id,track_key,title,artist,release_date,album,genres,source_note,raw_analysis,created_at,updated_at,credits:research_credits(id,creator_key,name,role,external_ipi,external_mbid)&order=updated_at.desc",
     accessToken,
   );
 }

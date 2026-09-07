@@ -71,7 +71,7 @@ function Network({ analysis, selected, onSelect }: { analysis: MusicAnalysis; se
   return <div className="border border-white/20 bg-[#171717] p-4"><svg className="h-[250px] w-full" viewBox="0 0 100 100" role="img" aria-label={text("협업 네트워크", "Collaboration network")}>{analysis.network.edges.map(edge => { const a = lookup.get(edge.source); const b = lookup.get(edge.target); return a && b ? <line key={`${edge.source}-${edge.target}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="rgba(255,255,255,.35)" strokeWidth=".6" /> : null; })}{points.map(point => <g className="cursor-pointer" key={point.id} onClick={() => onSelect(point)}><circle cx={point.x} cy={point.y} r={point.id === selected ? 6 : 4.4} fill={point.id === selected ? "#fff" : "#333"} stroke="#fff" strokeWidth=".5" /><text x={point.x} y={point.y + 10} textAnchor="middle" fill="#fff" fontSize="3.5">{point.name.slice(0, 13)}</text></g>)}</svg><p className="border-t border-white/15 pt-3 text-xs text-white/55">{text("노드를 선택하면 오른쪽 프로필과 차트가 바뀝니다.", "Select a node to update the profile and chart.")}</p></div>;
 }
 
-function Analysis({ analysis }: { analysis: MusicAnalysis }) {
+export function Analysis({ analysis }: { analysis: MusicAnalysis }) {
   const { text } = useLanguage();
   const people = Array.from(analysis.credits.reduce((map, credit) => {
     const existing = map.get(credit.creatorId);

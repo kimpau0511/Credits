@@ -10,6 +10,7 @@ import {
   normalizeCreditRole,
   normalizeCreditsFmRole,
   musicBrainzNameVariants,
+  mergeDuplicateTrackCandidates,
   PROFILE_SEARCH_MAX,
   PROFILE_SEARCH_MIN,
   RECENT_WORKS_LIMIT,
@@ -59,6 +60,16 @@ describe("music credit normalization", () => {
       { id: "kpop", title: "H.E.R", artist: "Block B", source: "Credits.fm", isrc: "KRA491401408" },
     ], "HER");
     assert.equal(ranked[0]?.id, "kpop");
+  });
+
+  it("merges the same ISRC returned by both providers", () => {
+    const merged = mergeDuplicateTrackCandidates([
+      { id: "isrc:KRA402400056", isrc: "KRA402400056", title: "DRIP", artist: "BABYMONSTER", source: "Credits.fm" },
+      { id: "mbid:recording", isrc: "KRA402400056", title: "DRIP", artist: "BABYMONSTER", releaseDate: "2024-11-01", source: "MusicBrainz" },
+    ]);
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].source, "Credits.fm");
+    assert.equal(merged[0].releaseDate, "2024-11-01");
   });
   it("maps known relationship labels into the credit taxonomy", () => {
     assert.equal(normalizeCreditRole("composer"), "작곡");
