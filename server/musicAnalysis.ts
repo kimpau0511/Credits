@@ -406,6 +406,38 @@ export function mergeDuplicateTrackCandidates(candidates: TrackCandidate[]) {
   return Array.from(unique.values());
 }
 
+const ALTERNATE_VERSION_PATTERN = /\b(?:live|concert|tour|remix|mix|instrumental|karaoke|demo|acoustic|sped\s*up|slowed|nightcore|remaster(?:ed)?|edit|ver(?:sion)?)\b|라이브|콘서트|리믹스|반주|인스트루멘탈/i;
+
+function canonicalCandidateTitle(value: string) {
+  return value.replace(/\s*[([{]\s*[^)\]}]+[)\]}]\s*$/, "").replace(/\s+[–—-]\s+.+$/, "").trim();
+}
+
+export function filterPreferredTrackCandidates(candidates: TrackCandidate[], title: string, artist?: string) {
+  const expectedTitle = normalizedText(title);
+  const expectedArtist = normalizedText(artist ?? "");
+  const titleMatches = candidates.filter(candidate => normalizedText(canonicalCandidateTitle(candidate.title)) === expectedTitle);
+  const artistMatches = expectedArtist
+    ? titleMatches.filter(candidate => normalizedText(candidate.artist).includes(expectedArtist))
+    : titleMatches;
+  const relevant = artistMatches.length ? artistMatches : titleMatches;
+  if (!relevant.length) return [];
+  const requestedAlternate = ALTERNATE_VERSION_PATTERN.test(title);
+  const standard = requestedAlternate ? relevant : relevant.filter(candidate => !ALTERNATE_VERSION_PATTERN.test(candidate.title));
+  const preferred = standard.length ? standard : relevant;
+  const unique = new Map<string, TrackCandidate>();
+  for (const candidate of preferred) {
+    const key = `${normalizedText(canonicalCandidateTitle(candidate.title))}:${normalizedText(candidate.artist)}`;
+    const current = unique.get(key);
+    if (!current) { unique.set(key, candidate); continue; }
+    unique.set(key, {
+      ...current,
+      releaseDate: current.releaseDate ?? candidate.releaseDate,
+      isrc: current.isrc ?? candidate.isrc,
+    });
+  }
+  return Array.from(unique.values());
+}
+
 function creditsFromCreditsFm(recording: CreditsIsrcResponse): MusicCredit[] {
   const credits = new Map<string, MusicCredit>();
   const performers = recording.performers ?? [];
@@ -516,17 +548,19 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
     releaseDate: recording["first-release-date"],
     source: "MusicBrainz" as const,
   }])).values());
-  let result = rankTrackCandidates(mergeDuplicateTrackCandidates([...creditsCandidates, ...musicBrainzCandidates]), title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
+  const rankedCandidates = rankTrackCandidates(mergeDuplicateTrackCandidates([...creditsCandidates, ...musicBrainzCandidates]), title, searchArtist);
+  let result = filterPreferredTrackCandidates(rankedCandidates, title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
   if (!result.length) {
     const emergency = await musicBrainzRequest<{ recordings?: MbRecording[] }>(`/recording?query=${encodeURIComponent(`recording:${providerTitle}`)}&limit=25&inc=artist-credits+isrcs&fmt=json`, { timeoutMs: 10_000, attempts: 1 }).catch(() => undefined);
-    result = rankTrackCandidates((emergency?.recordings ?? []).map(recording => ({
+    const emergencyCandidates = rankTrackCandidates((emergency?.recordings ?? []).map(recording => ({
       id: `mbid:${recording.id}`,
       isrc: recording.isrcs?.[0],
       title: recording.title,
       artist: primaryArtist(recording)?.name || artist || "Unknown artist",
       releaseDate: recording["first-release-date"],
       source: "MusicBrainz" as const,
-    })), title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
+    })), title, searchArtist);
+    result = filterPreferredTrackCandidates(emergencyCandidates, title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
   }
   if (result.length) candidateCache.set(cacheKey, { createdAt: Date.now(), result });
   return result;

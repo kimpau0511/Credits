@@ -7,6 +7,7 @@ import {
   CANDIDATE_DISPLAY_LIMIT,
   CANDIDATE_SEARCH_LIMIT,
   consolidateMusicCredits,
+  filterPreferredTrackCandidates,
   normalizeCreditRole,
   normalizeCreditsFmRole,
   musicBrainzNameVariants,
@@ -70,6 +71,24 @@ describe("music credit normalization", () => {
     assert.equal(merged.length, 1);
     assert.equal(merged[0].source, "Credits.fm");
     assert.equal(merged[0].releaseDate, "2024-11-01");
+  });
+
+  it("keeps the canonical album track and hides derivative versions", () => {
+    const filtered = filterPreferredTrackCandidates([
+      { id: "studio", isrc: "KRA402400061", title: "Woke Up in Tokyo", artist: "BABYMONSTER", source: "Credits.fm" },
+      { id: "live", isrc: "JPU902503062", title: "Woke Up In Tokyo (RUKA & ASA) (Live Version)", artist: "BABYMONSTER", source: "Credits.fm" },
+      { id: "remix", title: "Woke Up in Tokyo - Remix", artist: "BABYMONSTER", source: "MusicBrainz" },
+      { id: "other", title: "Woke Up in Tokyo", artist: "Other Artist", source: "MusicBrainz" },
+    ], "Woke Up in Tokyo", "BABYMONSTER");
+    assert.deepEqual(filtered.map(candidate => candidate.id), ["studio"]);
+  });
+
+  it("keeps a bilingual official title while removing a concert version", () => {
+    const filtered = filterPreferredTrackCandidates([
+      { id: "studio", title: "뱅뱅뱅 (BANG BANG BANG)", artist: "BIGBANG", source: "Credits.fm" },
+      { id: "concert", title: "뱅뱅뱅 (Live Concert Version)", artist: "BIGBANG", source: "MusicBrainz" },
+    ], "뱅뱅뱅", "BIGBANG");
+    assert.deepEqual(filtered.map(candidate => candidate.id), ["studio"]);
   });
   it("maps known relationship labels into the credit taxonomy", () => {
     assert.equal(normalizeCreditRole("composer"), "작곡");
