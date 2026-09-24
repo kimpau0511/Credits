@@ -33,14 +33,14 @@ export type MusicCredit = {
   creatorId: string;
   name: string;
   role: CreditRole;
-  source: "Credits.fm" | "MusicBrainz";
+  source: "Credits.fm" | "MusicBrainz" | "Verified catalog";
   externalIpi?: string;
   externalMbid?: string;
 };
 export type NetworkNode = { id: string; name: string; roles: CreditRole[]; appearances: number; externalIpi?: string; externalMbid?: string };
 export type NetworkEdge = { source: string; target: string; weight: number };
-export type TopTrack = { id: string; title: string; releaseDate?: string; relevance: number };
-export type TrackCandidate = { id: string; title: string; artist: string; releaseDate?: string; source: "Credits.fm" | "MusicBrainz"; isrc?: string };
+export type TopTrack = { id: string; title: string; artist?: string; releaseDate?: string; relevance: number };
+export type TrackCandidate = { id: string; title: string; artist: string; releaseDate?: string; source: "Credits.fm" | "MusicBrainz" | "Verified catalog"; isrc?: string };
 export type CollaboratorSignal = { creatorId: string; name: string; roles: CreditRole[]; workCount: number; sharePercent: number };
 export type ArtistCollaborationSignal = {
   artistId: string;
@@ -93,6 +93,52 @@ const creditsRecordingCache = new Map<string, CacheRecord<CreditsIsrcResponse>>(
 const identityCache = new Map<string, MbArtist | null>();
 let lastMusicBrainzRequestAt = 0;
 const creditsRateWindows: Record<"search" | "lookup", number[]> = { search: [], lookup: [] };
+
+type VerifiedCatalogTrack = {
+  id: string;
+  title: string;
+  titleAliases: string[];
+  artist: string;
+  artistAliases: string[];
+  releaseDate?: string;
+  credits: Array<{ name: string; role: CreditRole }>;
+};
+
+// Verified supplement for new Korean releases that have not reached the two
+// upstream credit catalogs yet. Keep both Korean and provider-facing aliases.
+const VERIFIED_CATALOG: VerifiedCatalogTrack[] = [
+  {
+    id: "verified:big-naughty-nostalgia-2026",
+    title: "노스탈지아",
+    titleAliases: ["노스탈지아", "Nostalgia"],
+    artist: "BIG Naughty (서동현)",
+    artistAliases: ["BIG Naughty", "빅나티", "서동현", "BIG Naughty (서동현)"],
+    releaseDate: "2026-08-31",
+    credits: [
+      { name: "BIG Naughty (서동현)", role: "아티스트" },
+      { name: "BIG Naughty (서동현)", role: "작사" },
+      { name: "BIG Naughty (서동현)", role: "작곡" },
+      { name: "dress", role: "작곡" },
+    ],
+  },
+];
+
+function findVerifiedCatalogTrack(title: string, artist?: string) {
+  const expectedTitle = normalizedText(title);
+  const expectedArtist = normalizedText(artist ?? "");
+  return VERIFIED_CATALOG.find(track => {
+    const titleMatches = track.titleAliases.some(alias => normalizedText(alias) === expectedTitle);
+    const artistMatches = !expectedArtist || track.artistAliases.some(alias => {
+      const normalizedAlias = normalizedText(alias);
+      return normalizedAlias.includes(expectedArtist) || expectedArtist.includes(normalizedAlias);
+    });
+    return titleMatches && artistMatches;
+  });
+}
+
+function verifiedTrackCandidate(track: VerifiedCatalogTrack): TrackCandidate {
+  return { id: track.id, title: track.title, artist: track.artist, releaseDate: track.releaseDate, source: "Verified catalog" };
+}
 
 function sleep(ms: number) { return new Promise(resolve => setTimeout(resolve, ms)); }
 function normalizedText(value: string) { return value.toLowerCase().replace(/[^a-z0-9가-힣]/g, ""); }
@@ -425,7 +471,7 @@ export function filterPreferredTrackCandidates(candidates: TrackCandidate[], tit
   const artistMatches = expectedArtist
     ? titleMatches.filter(candidate => normalizedText(candidate.artist).includes(expectedArtist))
     : titleMatches;
-  const relevant = artistMatches.length ? artistMatches : titleMatches;
+  const relevant = expectedArtist ? artistMatches : titleMatches;
   if (!relevant.length) return [];
   const requestedAlternate = ALTERNATE_VERSION_PATTERN.test(title);
   const standard = requestedAlternate ? relevant : relevant.filter(candidate => !ALTERNATE_VERSION_PATTERN.test(candidate.title));
@@ -486,6 +532,7 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
   const cacheKey = `${normalizedText(title)}::${normalizedText(artist ?? "")}`;
   const cached = candidateCache.get(cacheKey);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return cached.result;
+  const verifiedTrack = findVerifiedCatalogTrack(title, artist);
   const resolvedArtistPromise = artist ? resolveMusicBrainzIdentity(artist, { timeoutMs: 5_000, attempts: 1 }).catch(() => undefined) : Promise.resolve(undefined);
   const searchArtist = artist;
   const providerTitle = providerSearchText(title);
@@ -568,6 +615,7 @@ export async function searchMusicCandidates(input: { title: string; artist?: str
     })), title, searchArtist);
     result = filterPreferredTrackCandidates(emergencyCandidates, title, searchArtist).slice(0, CANDIDATE_DISPLAY_LIMIT);
   }
+  if (verifiedTrack) result = [verifiedTrackCandidate(verifiedTrack), ...result.filter(candidate => candidate.id !== verifiedTrack.id)];
   if (result.length) candidateCache.set(cacheKey, { createdAt: Date.now(), result });
   return result;
 }
@@ -710,7 +758,7 @@ async function getCreditsFmCreatorProfile(input: { creatorId: string; name: stri
   }).filter((item): item is CollaboratorSignal => Boolean(item)).sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 5);
   const result: CreatorProfile = {
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
-    works: sampleRows.map(row => ({ id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 })).slice(0, RECENT_WORKS_LIMIT),
+    works: sampleRows.map(row => ({ id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, artist: row.recording.artist_names?.join(", "), releaseDate: row.recording.release_date, relevance: 0 })).slice(0, RECENT_WORKS_LIMIT),
     collaborators,
     artistCollaborations: confidence === "verified" ? buildArtistCollaborations(uniqueRows.map(row => ({
       work: { id: row.recording.isrc, title: row.recording.song_title ?? row.recording.recording_title ?? row.recording.isrc, releaseDate: row.recording.release_date, relevance: 0 },
@@ -798,7 +846,7 @@ async function getMusicBrainzArtistProfile(input: { creatorId: string; name: str
     .sort((a, b) => b.workCount - a.workCount || a.name.localeCompare(b.name)).slice(0, 10);
   const confidence = verifiedCollaborationRows.length >= 3 && collaborators.length ? "verified" : "limited";
   const observedCollaboratorNames = collaborators.slice(0, 3).map(item => item.name).join(", ");
-  const works = uniqueRecordings.map(recording => ({ id: recording.id, title: recording.title, releaseDate: recording["first-release-date"], relevance: 0 }))
+  const works = uniqueRecordings.map(recording => ({ id: recording.id, title: recording.title, artist: (recording["artist-credit"] ?? []).map(credit => credit.artist?.name ?? credit.name).filter(Boolean).join(", ") || undefined, releaseDate: recording["first-release-date"], relevance: 0 }))
     .sort((first, second) => (second.releaseDate ?? "").localeCompare(first.releaseDate ?? "") || first.title.localeCompare(second.title));
   return {
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
@@ -861,7 +909,7 @@ async function getMusicBrainzCreatorProfile(input: { creatorId: string; name: st
       if (workId) workArtists.set(workId, (recording["artist-credit"] ?? []).flatMap(credit => credit.artist ? [{ id: credit.artist.id, name: credit.artist.name || credit.name || "Unknown artist" }] : []));
     }
   }
-  const datedWorks = verifiedWorks.map(work => ({ id: work.id, title: work.title, releaseDate: releaseDates.get(work.id), relevance: 0 }))
+  const datedWorks = verifiedWorks.map(work => ({ id: work.id, title: work.title, artist: workArtists.get(work.id)?.map(artist => artist.name).join(", ") || undefined, releaseDate: releaseDates.get(work.id), relevance: 0 }))
     .sort((first, second) => (second.releaseDate ?? "").localeCompare(first.releaseDate ?? "") || first.title.localeCompare(second.title));
   return {
     creator: { id: input.creatorId, name: input.name, roles: input.roles },
@@ -998,6 +1046,28 @@ async function musicBrainzFallback(title: string, artist?: string, isrc?: string
 export async function analyzeMusic(input: { title: string; artist?: string; isrc?: string; mbid?: string }): Promise<MusicAnalysis> {
   const title = input.title.trim();
   const artist = input.artist?.trim();
+  const verifiedTrack = !input.isrc && !input.mbid ? findVerifiedCatalogTrack(title, artist) : undefined;
+  if (verifiedTrack) {
+    const storedAt = Date.now();
+    const credits: MusicCredit[] = verifiedTrack.credits.map(credit => ({
+      creatorId: `verified:${normalizedText(credit.name)}`,
+      name: credit.name,
+      role: credit.role,
+      source: "Verified catalog",
+    }));
+    const track = { id: verifiedTrack.id, title: verifiedTrack.title, artist: verifiedTrack.artist, releaseDate: verifiedTrack.releaseDate };
+    return {
+      track,
+      credits,
+      network: buildCooccurrenceNetwork([credits]),
+      topTracks: [],
+      briefing: buildBriefing(track, credits, "enriched"),
+      sourceNote: "Credits.fm·MusicBrainz 반영 전인 신규 발매곡으로, 공개된 공식 발매 정보와 곡 크레딧을 검증 보완 카탈로그에서 표시합니다.",
+      creditsStatus: "enriched",
+      aiModel: "Rule-based credit editor",
+      cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS },
+    };
+  }
   const key = input.isrc ? `isrc:${input.isrc}` : input.mbid ? `mbid:${input.mbid}` : `${title.toLowerCase()}::${artist?.toLowerCase() ?? ""}`;
   const cached = analysisCache.get(key);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return { ...cached.result, cache: { state: "cached", storedAt: cached.createdAt, expiresAt: cached.createdAt + CACHE_TTL_MS } };

@@ -90,6 +90,14 @@ describe("music credit normalization", () => {
     ], "뱅뱅뱅", "BIGBANG");
     assert.deepEqual(filtered.map(candidate => candidate.id), ["studio"]);
   });
+
+  it("does not show unrelated same-title recordings when an artist was supplied", () => {
+    const filtered = filterPreferredTrackCandidates([
+      { id: "wrong", title: "Nostalgia", artist: "Unrelated Artist", source: "Credits.fm" },
+    ], "Nostalgia", "BIG Naughty");
+    assert.deepEqual(filtered, []);
+  });
+
   it("maps known relationship labels into the credit taxonomy", () => {
     assert.equal(normalizeCreditRole("composer"), "작곡");
     assert.equal(normalizeCreditRole("lyricist"), "작사");
