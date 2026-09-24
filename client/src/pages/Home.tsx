@@ -8,7 +8,7 @@ import { useCreatorProfile } from "@/hooks/useCreatorProfile";
 import type { CreatorProfile, MusicAnalysis, NetworkNode, TrackCandidate } from "../../../server/musicAnalysis";
 
 const examples = [{ title: "뱅뱅뱅", artist: "BIGBANG" }, { title: "APT.", artist: "ROSÉ" }, { title: "Die With A Smile", artist: "Lady Gaga" }];
-const roleOrder = ["작곡", "작사", "작사·작곡", "편곡", "프로듀싱", "아티스트", "연주", "기타"] as const;
+const roleOrder = ["작곡", "작사", "작사·작곡", "편곡", "프로듀싱", "믹싱", "마스터링", "아티스트", "연주", "기타"] as const;
 const tones = ["#0a0a0a", "#555", "#888", "#b7b7b2", "#dadad4"];
 
 function date(value: string | undefined, unavailable: string) { return value ? value.replace(/-/g, ".") : unavailable; }

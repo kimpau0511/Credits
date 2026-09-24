@@ -60,6 +60,11 @@ export function useCreatorProfile(selected?: NetworkNode) {
 
   useEffect(() => {
     if (!query.data || !creatorKey) return;
+    const hasCatalogEvidence = query.data.scannedWorks > 0 || query.data.works.length > 0;
+    if (!hasCatalogEvidence) {
+      setCacheState("failed");
+      return;
+    }
     const now = new Date();
     const next: SavedCreatorProfile = {
       profile: query.data,

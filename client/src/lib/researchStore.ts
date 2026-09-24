@@ -32,7 +32,7 @@ export type SavedCreatorProfile = {
 };
 
 export const CREATOR_PROFILE_CACHE_MS = 1000 * 60 * 60 * 24 * 30;
-export const CREATOR_PROFILE_CACHE_VERSION = 3;
+export const CREATOR_PROFILE_CACHE_VERSION = 4;
 
 export async function saveAnalysis(analysis: MusicAnalysis, userId: string, accessToken: string) {
   const trackKey = analysis.track.id.includes("-") ? `mbid:${analysis.track.id}` : `isrc:${analysis.track.id}`;
@@ -79,6 +79,14 @@ export function loadSavedTracks(accessToken: string) {
   return supabaseRest<SavedTrack[]>(
     "research_tracks?select=id,track_key,title,artist,release_date,album,genres,source_note,raw_analysis,created_at,updated_at,credits:research_credits(id,creator_key,name,role,external_ipi,external_mbid)&order=updated_at.desc",
     accessToken,
+  );
+}
+
+export async function deleteSavedTrack(trackId: string, userId: string, accessToken: string) {
+  await supabaseRest<void>(
+    `research_tracks?id=eq.${encodeURIComponent(trackId)}&user_id=eq.${encodeURIComponent(userId)}`,
+    accessToken,
+    { method: "DELETE", headers: { Prefer: "return=minimal" } },
   );
 }
 

@@ -28,7 +28,7 @@ const CREATOR_ALIAS_GROUPS = [
   },
 ] as const;
 
-export type CreditRole = "아티스트" | "작사" | "작곡" | "작사·작곡" | "편곡" | "프로듀싱" | "연주" | "기타";
+export type CreditRole = "아티스트" | "작사" | "작곡" | "작사·작곡" | "편곡" | "프로듀싱" | "믹싱" | "마스터링" | "연주" | "기타";
 export type MusicCredit = {
   creatorId: string;
   name: string;
@@ -113,7 +113,7 @@ function isUsableCreatorName(value: string) {
 }
 
 export function profileKindForRoles(roles: CreditRole[]): "artist" | "creator" {
-  const hasCreatorRole = roles.some(role => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(role));
+  const hasCreatorRole = roles.some(role => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱", "믹싱", "마스터링"].includes(role));
   return roles.includes("아티스트") && !hasCreatorRole ? "artist" : "creator";
 }
 
@@ -253,7 +253,7 @@ function enforceCreditsRateLimit(kind: "search" | "lookup") {
 
 async function musicBrainzRequest<T>(path: string, options: { timeoutMs?: number; attempts?: number } = {}): Promise<T> {
   let lastError: unknown;
-  const attempts = options.attempts ?? 2;
+  const attempts = options.attempts ?? 3;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const wait = Math.max(0, 1050 - (Date.now() - lastMusicBrainzRequestAt));
     if (wait) await sleep(wait);
@@ -267,12 +267,13 @@ async function musicBrainzRequest<T>(path: string, options: { timeoutMs?: number
     } catch (error) {
       lastError = error;
       if (attempt === attempts - 1) throw error;
+      await sleep(500 * 2 ** attempt);
     }
   }
   throw lastError;
 }
 
-async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lookup", timeoutMs = 15_000, attempts = 2): Promise<T> {
+async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lookup", timeoutMs = 15_000, attempts = 3): Promise<T> {
   enforceCreditsRateLimit(kind);
   const headers: Record<string, string> = { Accept: "application/json" };
   if (CREDITS_FM_API_KEY) headers["x-api-key"] = CREDITS_FM_API_KEY;
@@ -296,6 +297,7 @@ async function creditsFmRequest<T>(path: string, kind: "search" | "lookup" = "lo
     } catch (error) {
       lastError = error;
       if (attempt === attempts - 1) throw error;
+      await sleep(500 * 2 ** attempt);
     }
     await sleep(250);
   }
@@ -344,6 +346,8 @@ export function normalizeCreditRole(relationType?: string): CreditRole {
   if (["writer", "songwriter"].includes(normalized)) return "작사·작곡";
   if (["arranger", "instrument arranger"].includes(normalized)) return "편곡";
   if (["producer", "co-producer", "executive producer"].includes(normalized)) return "프로듀싱";
+  if (["mix", "mixing", "mix engineer", "mixing engineer"].includes(normalized)) return "믹싱";
+  if (["master", "mastering", "mastering engineer"].includes(normalized)) return "마스터링";
   if (["performer", "instrument", "vocal", "conductor"].includes(normalized)) return "연주";
   return "기타";
 }
@@ -356,6 +360,8 @@ export function normalizeCreditsFmRole(role?: string, creditType?: string): Cred
   if (normalized.includes("lyricist") || normalized.includes("lyrics") || normalized.includes("author")) return "작사";
   if (normalized.includes("arranger")) return "편곡";
   if (normalized.includes("producer")) return "프로듀싱";
+  if (normalized.includes("master")) return "마스터링";
+  if (normalized.includes("mix")) return "믹싱";
   if (normalized.includes("performer") || normalized.includes("vocal") || normalized.includes("instrument")) return "연주";
   return "기타";
 }
@@ -982,7 +988,7 @@ async function musicBrainzFallback(title: string, artist?: string, isrc?: string
   const workId = recording.relations?.find(relation => relation["target-type"] === "work")?.work?.id;
   const workCredits = workId ? creditsFromArtistRelations((await musicBrainzRequest<MbWork>(`/work/${encodeURIComponent(workId)}?inc=artist-rels&fmt=json`)).relations) : [];
   const credits = consolidateMusicCredits([...workCredits, ...performanceCredits(recording)]);
-  const detailed = credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role));
+  const detailed = credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱", "믹싱", "마스터링"].includes(credit.role));
   const release = recording.releases?.find(item => item.date === recording["first-release-date"]) ?? recording.releases?.[0];
   const track = { id: recording.id, title: recording.title, artist: primaryArtist(recording)?.name ?? artist ?? "Unknown artist", releaseDate: recording["first-release-date"], durationMs: recording.length, album: release?.title, genres: (recording.genres ?? []).flatMap(genre => genre.name ? [genre.name] : []) };
   const storedAt = Date.now();
@@ -999,7 +1005,7 @@ export async function analyzeMusic(input: { title: string; artist?: string; isrc
   const creditsRecording = await (input.isrc
     ? cachedCreditsRecording && Date.now() - cachedCreditsRecording.createdAt < CACHE_TTL_MS
       ? Promise.resolve(cachedCreditsRecording.result)
-      : creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(input.isrc)}`, "lookup", 20_000, 1).then(recording => {
+      : creditsFmRequest<CreditsIsrcResponse>(`/isrc/${encodeURIComponent(input.isrc)}`, "lookup", 20_000, 3).then(recording => {
           creditsRecordingCache.set(input.isrc!, { createdAt: Date.now(), result: recording });
           return recording;
         })
@@ -1007,15 +1013,15 @@ export async function analyzeMusic(input: { title: string; artist?: string; isrc
   let result: MusicAnalysis;
   if (creditsRecording) {
     const credits = creditsFromCreditsFm(creditsRecording);
-    const detailed = credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role));
+    const detailed = credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱", "믹싱", "마스터링"].includes(credit.role));
     const track = { id: creditsRecording.isrc, title: creditsRecording.song_title ?? creditsRecording.recording_title ?? title, artist: creditsRecording.artist_names?.join(", ") ?? artist ?? "Unknown artist", releaseDate: creditsRecording.release_date, album: creditsRecording.album_title ?? creditsRecording.release_title, genres: creditsRecording.genres ?? creditsRecording.songwriter_genres ?? [] };
     const storedAt = Date.now();
     result = { track, credits, network: buildCooccurrenceNetwork([credits]), topTracks: [], briefing: buildBriefing(track, credits, detailed.length ? "enriched" : "limited"), sourceNote: `Credits.fm ISRC ${creditsRecording.isrc} 응답을 우선 사용했습니다. 원본 소스: ${(creditsRecording.sources ?? []).join(", ") || "Credits.fm"}.`, creditsStatus: detailed.length ? "enriched" : "limited", aiModel: "Rule-based credit editor", cache: { state: "fresh", storedAt, expiresAt: storedAt + CACHE_TTL_MS } };
     if (!detailed.length) {
       const fallback = await musicBrainzFallback(track.title, track.artist, creditsRecording.isrc).catch(() => undefined);
-      const fallbackDetailed = fallback?.credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role)) ?? [];
+      const fallbackDetailed = fallback?.credits.filter(credit => ["작사", "작곡", "작사·작곡", "편곡", "프로듀싱", "믹싱", "마스터링"].includes(credit.role)) ?? [];
       if (fallback && fallbackDetailed.length) {
-        const nonCreativeCredits = credits.filter(credit => !["작사", "작곡", "작사·작곡", "편곡", "프로듀싱"].includes(credit.role));
+        const nonCreativeCredits = credits.filter(credit => !["작사", "작곡", "작사·작곡", "편곡", "프로듀싱", "믹싱", "마스터링"].includes(credit.role));
         const mergedCredits = consolidateMusicCredits([...nonCreativeCredits, ...fallback.credits]);
         const mergedTrack = {
           ...fallback.track,

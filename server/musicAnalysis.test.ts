@@ -95,6 +95,8 @@ describe("music credit normalization", () => {
     assert.equal(normalizeCreditRole("lyricist"), "작사");
     assert.equal(normalizeCreditRole("writer"), "작사·작곡");
     assert.equal(normalizeCreditRole("producer"), "프로듀싱");
+    assert.equal(normalizeCreditRole("mixing engineer"), "믹싱");
+    assert.equal(normalizeCreditRole("mastering engineer"), "마스터링");
     assert.equal(normalizeCreditRole("unknown"), "기타");
   });
 
@@ -109,7 +111,8 @@ describe("music credit normalization", () => {
     assert.equal(normalizeCreditsFmRole("Lyrics by"), "작사");
     assert.equal(normalizeCreditsFmRole("Author"), "작사");
     assert.equal(normalizeCreditsFmRole("arranger", "producer"), "편곡");
-    assert.equal(normalizeCreditsFmRole("mix", "producer"), "기타");
+    assert.equal(normalizeCreditsFmRole("mix", "producer"), "믹싱");
+    assert.equal(normalizeCreditsFmRole("mastering engineer", "producer"), "마스터링");
     assert.equal(normalizeCreditsFmRole("engineer", "producer"), "기타");
   });
 
